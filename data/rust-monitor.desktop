@@ -1,0 +1,8 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Name=Rust Monitor
+Comment=System metrics and configured extensions
+Icon=utilities-system-monitor
+X-XFCE-Module=rust-monitor
+X-XFCE-API=2.0
+X-XFCE-Internal=FALSE

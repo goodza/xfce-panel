@@ -1,0 +1,11 @@
+interval_seconds = 2
+disks = ["/"]
+# cpu_sensor = "/sys/class/hwmon/hwmon0/temp1_input"
+# Omit fan_sensors for discovery; [] disables fans.
+# fan_sensors = []
+
+# Uncomment after setting the executable's absolute path.
+# [[extensions]]
+# name = "Example"
+# command = ["/absolute/path/to/examples/metric.sh"]
+# timeout_ms = 1000
