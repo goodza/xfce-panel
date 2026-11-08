@@ -14,7 +14,7 @@ Rust owns Linux collection, TOML configuration, extension lifecycle, formatting,
 
 ## Display and collection
 
-Only metrics belong to the widget. Horizontal panels show inline text; vertical and deskbar panels stack the same metric text. Tooltip text is plain text, never markup. Missing readings and failed scripts are hidden from the panel and described in the tooltip; an empty snapshot displays Monitor so diagnostics remain accessible.
+Only metrics belong to the widget. Horizontal panels show inline text; vertical and deskbar panels stack the same metric text. CPU temperature, first fan, and available RAM display their values and units without CPU, Fan 1, RAM, or available labels. The second fan by sorted sensor-path index is tooltip-only, even if the first fan is unreadable; later fan entries retain their existing labels. Tooltips retain all metric labels and readable fans. Tooltip text is plain text, never markup. Missing readings and failed scripts are hidden from the panel and described in the tooltip; an empty snapshot displays Monitor so diagnostics remain accessible.
 
 CPU discovery uses the hottest tempN_input from coretemp, k10temp, zenpower, or cpu_thermal drivers, avoiding unrelated storage temperatures. Explicit sensor paths override discovery. Fan discovery covers all fanN_input files; zero RPM is a real reading. RAM means MemAvailable. Filesystem occupancy uses used/(used+available), reflecting unprivileged capacity rather than reserved blocks; / is the default and paths are configurable.
 
@@ -30,7 +30,7 @@ Nonblocking pipes prevent descendants holding pipes open from stalling collectio
 
 ## Native lifecycle and ownership
 
-monitor_collect returns an owned C-compatible snapshot; monitor_snapshot_free releases it exactly once. NULL config selects the shared default file; panics are contained at the ABI and reported by NULL. C uses plain text APIs, so script output cannot become GTK markup.
+monitor_collect returns an owned C-compatible snapshot; monitor_snapshot_free releases it exactly once. NULL config selects the shared default file; panics are contained at the ABI and reported by NULL. The snapshot's cpu_hot flag is 1 only for an available raw CPU temperature strictly above 80000 millidegrees Celsius, independent of display rounding; when set, CPU is the first metric. Rust and the native adapter must be built together against the current snapshot layout. C applies a red Pango foreground attribute only to that first metric's UTF-8 byte range in either layout. It replaces the attributes on every repaint, resetting color at or below 80°C, on missing CPU, or on collection failure. Other metrics retain normal color. This structured flag avoids reparsing rounded text; Pango attributes preserve plain-text label APIs, so scripts cannot inject markup.
 
 The GTK main loop launches one GTask at a time and schedules the next one-shot timer after completion. Its interval is a post-collection delay, not a wall-clock guarantee. A task holds state and plugin references; removal marks state removed, removes the timer, and prevents later widget access. Teardown waits on a condition signaled by the worker after Rust collection returns, independent of GTK callback dispatch. Retaining objects or mapping the module does not keep XFCE's external wrapper process alive: waiting is necessary to finish script cleanup before wrapper exit. Sequential timeout budgets may delay removal by up to 160 seconds plus collection overhead. Kernel filesystem/device I/O is not bounded.
 

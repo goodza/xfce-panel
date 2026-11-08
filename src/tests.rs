@@ -115,10 +115,75 @@ fn hwmon_discovery_is_cpu_specific_and_sorted() {
     let cfg = f.write("config", "disks=[]");
     let mem = f.write("meminfo", "MemAvailable: 1048576 kB\n");
     let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &mem);
-    assert!(s.text.contains("CPU 70.0 °C"));
+    assert!(s.text.contains("70.0 °C"));
+    assert!(!s.text.contains("CPU"));
+    assert!(!s.text.contains("Fan 1"));
+    assert!(!s.text.contains("RAM"));
+    assert!(!s.text.contains("available"));
+    assert!(s.tooltip.contains("CPU 70.0 °C"));
+    assert!(s.tooltip.contains("RAM 1.00 GiB available"));
     assert!(!s.text.contains("99.0"));
     assert!(s.text.contains("1200 RPM"));
     assert!(s.text.contains("1.00 GiB"));
+}
+
+#[test]
+fn compact_panel_hides_second_fan_but_preserves_tooltip() {
+    let f = Fixture::new();
+    f.write("hwmon/hwmon0/name", "coretemp\n");
+    f.write("hwmon/hwmon0/temp1_input", "54000\n");
+    f.write("hwmon/hwmon0/fan1_input", "1240\n");
+    f.write("hwmon/hwmon0/fan2_input", "9876\n");
+    let cfg = f.write("config", "disks=[]");
+    let mem = f.write("meminfo", "MemAvailable: 1048576 kB\n");
+    let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &mem);
+    assert_eq!(s.text, "54.0 °C · 1240 RPM · 1.00 GiB");
+    assert!(s.tooltip.contains("CPU 54.0 °C"));
+    assert!(s.tooltip.contains("Fan 1 ("));
+    assert!(s.tooltip.contains("Fan 2 ("));
+    assert!(s.tooltip.contains("9876 RPM"));
+    assert!(s.tooltip.contains("RAM 1.00 GiB available"));
+
+    f.write("hwmon/hwmon0/fan1_input", "invalid");
+    let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &mem);
+    assert!(!s.text.contains("RPM"));
+    assert!(s.tooltip.contains("9876 RPM"));
+
+    f.write("hwmon/hwmon0/fan1_input", "0");
+    f.write("hwmon/hwmon0/fan2_input", "invalid");
+    f.write("hwmon/hwmon0/fan3_input", "2222");
+    let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &mem);
+    assert_eq!(s.text, "54.0 °C · 0 RPM · Fan 3 2222 RPM · 1.00 GiB");
+}
+
+#[test]
+fn cpu_warning_uses_raw_threshold_and_resets_when_unavailable() {
+    let f = Fixture::new();
+    let sensor = f.write("sensor", "80000");
+    let cfg = f.write(
+        "config",
+        &format!("disks=[]\nfan_sensors=[]\ncpu_sensor={:?}", sensor),
+    );
+    let cpath = CString::new(cfg.to_str().unwrap()).unwrap();
+    for (reading, hot) in [
+        (79_999, false),
+        (80_000, false),
+        (80_001, true),
+        (81_000, true),
+        (70_000, false),
+    ] {
+        f.write("sensor", &reading.to_string());
+        assert_eq!(collect(Some(&cfg)).cpu_hot, hot, "{reading}");
+        // SAFETY: cpath is live; each returned snapshot is released unchanged once.
+        unsafe {
+            let snapshot = monitor_collect(cpath.as_ptr());
+            assert!(!snapshot.is_null());
+            assert_eq!((*snapshot).cpu_hot, u32::from(hot));
+            monitor_snapshot_free(snapshot);
+        }
+    }
+    f.write("sensor", "invalid");
+    assert!(!collect(Some(&cfg)).cpu_hot);
 }
 
 #[test]
@@ -141,7 +206,7 @@ fn recognized_drivers_and_explicit_overrides() {
         ),
     );
     let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &f.0.join("missing"));
-    assert_eq!(s.text, "CPU 88.0 °C");
+    assert_eq!(s.text, "88.0 °C");
 }
 
 #[test]

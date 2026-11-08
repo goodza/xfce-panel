@@ -11,6 +11,8 @@ typedef struct MonitorSnapshot {
     char *text;
     char *tooltip;
     uint32_t interval_seconds;
+    /* 1 iff a CPU reading exists and exceeds 80 C; CPU is then the first metric. */
+    uint32_t cpu_hot;
 } MonitorSnapshot;
 
 /* Thread-safe; no GTK calls. config_path is a borrowed NUL-terminated Unix path,

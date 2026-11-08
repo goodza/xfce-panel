@@ -12,6 +12,7 @@ pub struct Snapshot {
     pub text: String,
     pub tooltip: String,
     pub interval_seconds: u32,
+    pub cpu_hot: bool,
 }
 
 pub fn collect(config_path: Option<&Path>) -> Snapshot {
@@ -38,8 +39,8 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
         }
     }
     if let Some(temp) = hottest {
-        let value = format!("CPU {:.1} °C", temp as f64 / 1000.0);
-        details.push(value.clone());
+        let value = format!("{:.1} °C", temp as f64 / 1000.0);
+        details.push(format!("CPU {value}"));
         metrics.push(value);
     } else {
         details.push("CPU temperature unavailable: no readable recognized CPU sensor".into());
@@ -52,7 +53,11 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
     for (i, path) in fans.iter().enumerate() {
         match sensors::reading(path) {
             Ok(rpm) if rpm >= 0 => {
-                metrics.push(format!("Fan {} {rpm} RPM", i + 1));
+                match i {
+                    0 => metrics.push(format!("{rpm} RPM")),
+                    1 => {}
+                    _ => metrics.push(format!("Fan {} {rpm} RPM", i + 1)),
+                }
                 details.push(format!("Fan {} ({}): {rpm} RPM", i + 1, path.display()));
             }
             Ok(_) => details.push(format!("{}: negative fan reading", path.display())),
@@ -64,9 +69,9 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
         .and_then(|s| sensors::mem_available(&s))
     {
         Ok(bytes) => {
-            let value = format!("RAM {:.2} GiB available", bytes as f64 / 1073741824.0);
-            metrics.push(value.clone());
-            details.push(value);
+            let value = format!("{:.2} GiB", bytes as f64 / 1073741824.0);
+            details.push(format!("RAM {value} available"));
+            metrics.push(value);
         }
         Err(e) => details.push(format!("Memory unavailable: {e}")),
     }
@@ -105,6 +110,7 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
         },
         tooltip: details.join("\n"),
         interval_seconds: config.interval_seconds,
+        cpu_hot: hottest.is_some_and(|temp| temp > 80_000),
     }
 }
 
@@ -113,6 +119,7 @@ pub struct MonitorSnapshot {
     pub text: *mut c_char,
     pub tooltip: *mut c_char,
     pub interval_seconds: u32,
+    pub cpu_hot: u32,
 }
 
 fn c_string(s: String) -> CString {
@@ -141,6 +148,7 @@ pub unsafe extern "C" fn monitor_collect(config_path: *const c_char) -> *mut Mon
             text: c_string(snapshot.text).into_raw(),
             tooltip: c_string(snapshot.tooltip).into_raw(),
             interval_seconds: snapshot.interval_seconds,
+            cpu_hot: u32::from(snapshot.cpu_hot),
         }))
     })
     .unwrap_or(std::ptr::null_mut())

@@ -3,10 +3,10 @@
 Extensible Linux system metrics in the XFCE4 panel: CPU temperature, fan RPM, available RAM, and filesystem usage. Rust handles collection and scripts; a small C/GTK3 adapter integrates with XFCE.
 
 ```text
-CPU 54.0 °C · Fan 1 1240 RPM · RAM 8.20 GiB available · / 62%
+54.0 °C · 1240 RPM · 8.20 GiB · / 62%
 ```
 
-Metrics appear inline; hover for details and diagnostics. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. There is no Applications menu or settings dialog.
+Metrics appear inline without CPU, first-fan, or RAM labels; hover retains full labels and diagnostics. The second fan is tooltip-only (numbering follows sorted configured/discovered sensor paths). CPU temperature turns red strictly above 80°C and returns to normal at or below 80°C or when unavailable. The threshold uses the raw reading, so a value rounded to 80.0°C can still be red. Other metrics keep their normal color. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. There is no Applications menu or settings dialog.
 
 ## Try without installing
 
@@ -32,7 +32,7 @@ make
 
 Requires XFCE4 panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
 
-**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks fixture readings, real RAM/disk metrics, literal text, config reload, orientation callbacks, and removal during a running extension. Staged installation also passes. Actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
+**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, config reload, orientation callbacks, and removal during a running extension. Staged installation also passes. Actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
 
 ```sh
 make test-native

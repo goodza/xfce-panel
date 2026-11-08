@@ -1,5 +1,6 @@
 #include <gio/gio.h>
 #include <libxfce4panel/libxfce4panel.h>
+#include <string.h>
 
 #include "rust-monitor.h"
 
@@ -11,6 +12,7 @@ typedef struct {
     guint timeout_id;
     gboolean in_flight;
     gboolean removed;
+    gboolean cpu_hot;
     GMutex worker_mutex;
     GCond worker_done;
     gboolean worker_running;
@@ -87,6 +89,17 @@ repaint(MonitorState *state, gboolean stacked)
     } else {
         gtk_label_set_text(GTK_LABEL(state->label), state->text);
     }
+    PangoAttrList *attributes = pango_attr_list_new();
+    if (state->cpu_hot) {
+        const gchar *separator = strstr(state->text, " · ");
+        PangoAttribute *color = pango_attr_foreground_new(65535, 0, 0);
+        color->start_index = 0;
+        color->end_index = separator != NULL ? (guint) (separator - state->text)
+                                            : (guint) strlen(state->text);
+        pango_attr_list_insert(attributes, color);
+    }
+    gtk_label_set_attributes(GTK_LABEL(state->label), attributes);
+    pango_attr_list_unref(attributes);
 }
 
 static void
@@ -156,10 +169,12 @@ collect_done(GObject *source_object, GAsyncResult *result, gpointer user_data)
             interval = MAX(1u, snapshot->interval_seconds);
             g_free(state->text);
             state->text = g_strdup(snapshot->text);
+            state->cpu_hot = snapshot->cpu_hot != 0;
             gtk_widget_set_tooltip_text(state->label, snapshot->tooltip);
         } else {
             g_free(state->text);
             state->text = g_strdup("Monitor");
+            state->cpu_hot = FALSE;
             gtk_widget_set_tooltip_text(state->label, "Monitor collection failed");
         }
         repaint(state, xfce_panel_plugin_get_mode(state->plugin) !=
