@@ -11,6 +11,9 @@ typedef struct {
     guint timeout_id;
     gboolean in_flight;
     gboolean removed;
+    GMutex worker_mutex;
+    GCond worker_done;
+    gboolean worker_running;
 } MonitorState;
 
 static void start_refresh(MonitorState *state);
@@ -29,6 +32,8 @@ state_unref(gpointer data)
 
     if (g_atomic_int_dec_and_test(&state->refs)) {
         g_free(state->text);
+        g_cond_clear(&state->worker_done);
+        g_mutex_clear(&state->worker_mutex);
         g_free(state);
     }
 }
@@ -42,6 +47,10 @@ stop_refresh(MonitorState *state)
         g_source_remove(state->timeout_id);
         state->timeout_id = 0;
     }
+    g_mutex_lock(&state->worker_mutex);
+    while (state->worker_running)
+        g_cond_wait(&state->worker_done, &state->worker_mutex);
+    g_mutex_unlock(&state->worker_mutex);
 }
 
 static void
@@ -108,10 +117,17 @@ static void
 collect_worker(GTask *task, gpointer source_object, gpointer task_data,
                GCancellable *cancellable)
 {
+    MonitorState *state = task_data;
+    MonitorSnapshot *snapshot;
+
     (void) source_object;
-    (void) task_data;
     (void) cancellable;
-    g_task_return_pointer(task, monitor_collect(NULL), snapshot_free);
+    snapshot = monitor_collect(NULL);
+    g_mutex_lock(&state->worker_mutex);
+    state->worker_running = FALSE;
+    g_cond_broadcast(&state->worker_done);
+    g_mutex_unlock(&state->worker_mutex);
+    g_task_return_pointer(task, snapshot, snapshot_free);
 }
 
 static gboolean
@@ -163,6 +179,9 @@ start_refresh(MonitorState *state)
     if (state->removed || state->in_flight)
         return;
     state->in_flight = TRUE;
+    g_mutex_lock(&state->worker_mutex);
+    state->worker_running = TRUE;
+    g_mutex_unlock(&state->worker_mutex);
     task = g_task_new(state->plugin, NULL, collect_done, NULL);
     g_task_set_task_data(task, state_ref(state), state_unref);
     g_task_run_in_thread(task, collect_worker);
@@ -175,6 +194,8 @@ monitor_construct(XfcePanelPlugin *plugin)
     MonitorState *state = g_new0(MonitorState, 1);
 
     state->refs = 1;
+    g_mutex_init(&state->worker_mutex);
+    g_cond_init(&state->worker_done);
     state->plugin = plugin;
     state->text = g_strdup("Monitor…");
     state->label = gtk_label_new(state->text);
