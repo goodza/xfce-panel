@@ -4,7 +4,8 @@ disks = ["/"]
 # Omit fan_sensors for discovery; [] disables fans.
 # fan_sensors = []
 
-[[extensions]]
-name = "Example"
-command = ["/absolute/path/to/examples/metric.sh"]
-timeout_ms = 1000
+# Uncomment after setting the executable's absolute path.
+# [[extensions]]
+# name = "Example"
+# command = ["/absolute/path/to/examples/metric.sh"]
+# timeout_ms = 1000

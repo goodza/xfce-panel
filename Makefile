@@ -16,7 +16,7 @@ PACKAGES := libxfce4panel-2.0 gtk+-3.0 gio-2.0
 PLUGIN_LIBDIR := $(LIBDIR)/xfce4/panel/plugins
 PLUGIN_DATADIR := $(DATADIR)/xfce4/panel/plugins
 
-.PHONY: all check-deps rust install uninstall clean test
+.PHONY: all check-deps rust install uninstall clean test test-ffi
 all: check-deps $(PLUGIN)
 
 check-deps:
@@ -48,6 +48,13 @@ test:
 	$(CARGO) fmt --all -- --check
 	$(CARGO) test --all-targets
 	$(CARGO) clippy --all-targets -- -D warnings
+
+test-ffi: rust
+	mkdir -p "$(NATIVE_BUILD_DIR)"
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -Iinclude \
+		tests/ffi-smoke.c "$(RUST_LIB)" $(LDFLAGS) -ldl -lpthread -lm $(LDLIBS) \
+		-o "$(NATIVE_BUILD_DIR)/ffi-smoke"
+	"$(NATIVE_BUILD_DIR)/ffi-smoke" config.example.toml
 
 clean:
 	$(CARGO) clean --target-dir "$(CARGO_TARGET_DIR)"

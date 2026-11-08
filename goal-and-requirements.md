@@ -24,6 +24,12 @@ Checking CPU temperature, fan speed, memory headroom, and disk capacity should n
 - Display filesystem space usage, rather than disk I/O throughput.
 - Add metrics through executable scripts returning metric values.
 - Provide build, installation, and configuration instructions for personal use.
+- Show metrics inline with hover details; omit missing readings rather than displaying N/A.
+- Reload a shared local configuration file for sensor selection, filesystem paths, script extensions, and refresh delay.
+
+## Tech Notes
+
+A Rust monitoring core integrates with XFCE4 through a thin C/GTK3 panel adapter. A diagnostic CLI uses the same core without requiring GTK development headers. See xfce-monitor-architecture for contracts and lifecycle decisions.
 
 ## Non-Goals
 
