@@ -26,13 +26,21 @@ The CLI prints one snapshot followed by its tooltip. `make test-ffi` additionall
 On Debian/Ubuntu, install these dependencies yourself (not installed by this project):
 
 ```sh
-sudo apt install build-essential pkg-config libxfce4panel-2.0-dev libgtk-3-dev libglib2.0-dev
+sudo apt install build-essential pkg-config libxfce4panel-2.0-dev libxfce4ui-2-dev libgtk-3-dev libglib2.0-dev
 make
 ```
 
 Requires XFCE4 panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
 
-**Verification status:** Rust checks, release builds, and the C ABI smoke test run locally. Native compilation and live-panel behavior have not been verified here: GTK/XFCE development headers are missing. Do not treat the adapter as panel-tested yet.
+**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks fixture readings, real RAM/disk metrics, literal text, config reload, orientation callbacks, and removal during a running extension. Staged installation also passes. Actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
+
+```sh
+make test-native
+# For a headless environment with Xvfb installed:
+# xvfb-run -a make test-native
+```
+
+The native test requires a working GTK display even though it uses an offscreen window. It uses temporary configuration, never your real config; missing display is a failure, not a skipped pass.
 
 ## Install into XFCE's plugin directories
 
@@ -113,9 +121,9 @@ Collection normally runs off the UI thread with one job in flight. Removing the 
 
 ## Native verification checklist
 
-Once development packages are installed:
+For the remaining live-panel checks:
 
-1. Run `make`, then stage/install into the panel's actual directories.
+1. Run `make test-native`, then install into the panel's actual directories.
 2. Add Rust Monitor; check inline readings and plain-text hover details.
 3. Edit the config and verify reload, invalid-config diagnostics, explicit sensors, and additional filesystems.
 4. Add a successful script, failing script, and timed-out script; verify hidden failures and tooltip errors.

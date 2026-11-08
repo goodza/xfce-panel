@@ -16,7 +16,7 @@ PACKAGES := libxfce4panel-2.0 gtk+-3.0 gio-2.0
 PLUGIN_LIBDIR := $(LIBDIR)/xfce4/panel/plugins
 PLUGIN_DATADIR := $(DATADIR)/xfce4/panel/plugins
 
-.PHONY: all check-deps rust install uninstall clean test test-ffi
+.PHONY: all check-deps rust install uninstall clean test test-ffi test-native
 all: check-deps $(PLUGIN)
 
 check-deps:
@@ -55,6 +55,15 @@ test-ffi: rust
 		tests/ffi-smoke.c "$(RUST_LIB)" $(LDFLAGS) -ldl -lpthread -lm $(LDLIBS) \
 		-o "$(NATIVE_BUILD_DIR)/ffi-smoke"
 	"$(NATIVE_BUILD_DIR)/ffi-smoke" config.example.toml
+
+# Requires a working GTK display; unavailable displays are failures, not skips.
+test-native: $(PLUGIN)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror \
+		$$($(PKG_CONFIG) --cflags $(PACKAGES) gmodule-2.0) \
+		tests/native-smoke.c $(LDFLAGS) \
+		$$($(PKG_CONFIG) --libs $(PACKAGES) gmodule-2.0) $(LDLIBS) \
+		-o "$(NATIVE_BUILD_DIR)/native-smoke"
+	"$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(PLUGIN))"
 
 clean:
 	$(CARGO) clean --target-dir "$(CARGO_TARGET_DIR)"
