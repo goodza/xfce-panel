@@ -10,6 +10,9 @@ int main(int argc, char **argv)
     assert(snapshot != NULL);
     assert(snapshot->text != NULL && strlen(snapshot->text) > 0);
     assert(snapshot->tooltip != NULL);
+    assert(snapshot->ram_text != NULL && strlen(snapshot->ram_text) > 0);
+    assert(strstr(snapshot->text, snapshot->ram_text) != NULL ||
+           strcmp(snapshot->ram_text, "Monitor") == 0);
     assert(snapshot->interval_seconds >= 1 && snapshot->interval_seconds <= 3600);
     assert(snapshot->cpu_hot <= 1);
     monitor_snapshot_free(snapshot);

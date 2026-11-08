@@ -125,6 +125,8 @@ fn hwmon_discovery_is_cpu_specific_and_sorted() {
     assert!(!s.text.contains("99.0"));
     assert!(s.text.contains("1200 RPM"));
     assert!(s.text.contains("1.00 GiB"));
+    assert_eq!(s.ram_text, "1.00 GiB");
+    assert!(s.text.split(" · ").any(|metric| metric == s.ram_text));
 }
 
 #[test]
@@ -207,6 +209,7 @@ fn recognized_drivers_and_explicit_overrides() {
     );
     let s = collect_from(Some(&cfg), &f.0.join("hwmon"), &f.0.join("missing"));
     assert_eq!(s.text, "88.0 °C");
+    assert_eq!(s.ram_text, "Monitor");
 }
 
 #[test]
@@ -215,6 +218,7 @@ fn no_metrics_fallback_diagnostics_and_reload() {
     let cfg = f.write("config", "interval_seconds=3\ndisks=[]\nfan_sensors=[]");
     let s = collect_from(Some(&cfg), &f.0.join("absent"), &f.0.join("absent"));
     assert_eq!(s.text, "Monitor");
+    assert_eq!(s.ram_text, "Monitor");
     assert_eq!(s.interval_seconds, 3);
     assert!(s.tooltip.contains("CPU temperature unavailable"));
     assert!(s.tooltip.contains("Memory unavailable"));
@@ -341,6 +345,13 @@ fn ffi_ownership_null_and_parallel_collection() {
         assert_eq!((*ptr).interval_seconds, 7);
         assert!(!CStr::from_ptr((*ptr).text).to_bytes().is_empty());
         assert!(CStr::from_ptr((*ptr).tooltip).to_str().is_ok());
+        let ram = CStr::from_ptr((*ptr).ram_text).to_str().unwrap();
+        assert!(!ram.is_empty());
+        assert!(CStr::from_ptr((*ptr).text)
+            .to_str()
+            .unwrap()
+            .split(" · ")
+            .any(|metric| metric == ram));
         monitor_snapshot_free(ptr);
     }
     assert_eq!(c_string("a\0b".into()).to_str().unwrap(), "a�b");

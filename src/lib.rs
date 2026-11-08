@@ -11,6 +11,7 @@ use std::{
 pub struct Snapshot {
     pub text: String,
     pub tooltip: String,
+    pub ram_text: String,
     pub interval_seconds: u32,
     pub cpu_hot: bool,
 }
@@ -64,17 +65,21 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
             Err(e) => details.push(e),
         }
     }
-    match std::fs::read_to_string(meminfo)
+    let ram_text = match std::fs::read_to_string(meminfo)
         .map_err(|e| e.to_string())
         .and_then(|s| sensors::mem_available(&s))
     {
         Ok(bytes) => {
             let value = format!("{:.2} GiB", bytes as f64 / 1073741824.0);
             details.push(format!("RAM {value} available"));
-            metrics.push(value);
+            metrics.push(value.clone());
+            value
         }
-        Err(e) => details.push(format!("Memory unavailable: {e}")),
-    }
+        Err(e) => {
+            details.push(format!("Memory unavailable: {e}"));
+            "Monitor".into()
+        }
+    };
     for path in config.disks {
         match sensors::disk(&path) {
             Ok(disk) => {
@@ -109,6 +114,7 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
             metrics.join(" · ")
         },
         tooltip: details.join("\n"),
+        ram_text,
         interval_seconds: config.interval_seconds,
         cpu_hot: hottest.is_some_and(|temp| temp > 80_000),
     }
@@ -118,6 +124,7 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
 pub struct MonitorSnapshot {
     pub text: *mut c_char,
     pub tooltip: *mut c_char,
+    pub ram_text: *mut c_char,
     pub interval_seconds: u32,
     pub cpu_hot: u32,
 }
@@ -147,6 +154,7 @@ pub unsafe extern "C" fn monitor_collect(config_path: *const c_char) -> *mut Mon
         Box::into_raw(Box::new(MonitorSnapshot {
             text: c_string(snapshot.text).into_raw(),
             tooltip: c_string(snapshot.tooltip).into_raw(),
+            ram_text: c_string(snapshot.ram_text).into_raw(),
             interval_seconds: snapshot.interval_seconds,
             cpu_hot: u32::from(snapshot.cpu_hot),
         }))
@@ -168,6 +176,7 @@ pub unsafe extern "C" fn monitor_snapshot_free(snapshot: *mut MonitorSnapshot) {
                 let snapshot = Box::from_raw(snapshot);
                 drop(CString::from_raw(snapshot.text));
                 drop(CString::from_raw(snapshot.tooltip));
+                drop(CString::from_raw(snapshot.ram_text));
             }
         }
     });

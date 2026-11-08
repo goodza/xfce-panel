@@ -9,6 +9,8 @@ typedef struct {
     XfcePanelPlugin *plugin; /* borrowed; owned by the task while collecting */
     GtkWidget *label;
     gchar *text;
+    gchar *ram_text;
+    gboolean minimized;
     guint timeout_id;
     gboolean in_flight;
     gboolean removed;
@@ -34,10 +36,18 @@ state_unref(gpointer data)
 
     if (g_atomic_int_dec_and_test(&state->refs)) {
         g_free(state->text);
+        g_free(state->ram_text);
         g_cond_clear(&state->worker_done);
         g_mutex_clear(&state->worker_mutex);
         g_free(state);
     }
+}
+
+static void
+button_state_unref(gpointer data, GClosure *closure)
+{
+    (void) closure;
+    state_unref(data);
 }
 
 static void
@@ -80,17 +90,18 @@ repaint(MonitorState *state, gboolean stacked)
     if (state->removed)
         return;
 
+    const gchar *selected = state->minimized ? state->ram_text : state->text;
     if (stacked) {
-        parts = g_strsplit(state->text, " · ", -1);
+        parts = g_strsplit(selected, " · ", -1);
         text = g_strjoinv("\n", parts);
         gtk_label_set_text(GTK_LABEL(state->label), text);
         g_free(text);
         g_strfreev(parts);
     } else {
-        gtk_label_set_text(GTK_LABEL(state->label), state->text);
+        gtk_label_set_text(GTK_LABEL(state->label), selected);
     }
     PangoAttrList *attributes = pango_attr_list_new();
-    if (state->cpu_hot) {
+    if (state->cpu_hot && !state->minimized) {
         const gchar *separator = strstr(state->text, " · ");
         PangoAttribute *color = pango_attr_foreground_new(65535, 0, 0);
         color->start_index = 0;
@@ -169,11 +180,15 @@ collect_done(GObject *source_object, GAsyncResult *result, gpointer user_data)
             interval = MAX(1u, snapshot->interval_seconds);
             g_free(state->text);
             state->text = g_strdup(snapshot->text);
+            g_free(state->ram_text);
+            state->ram_text = g_strdup(snapshot->ram_text);
             state->cpu_hot = snapshot->cpu_hot != 0;
             gtk_widget_set_tooltip_text(state->label, snapshot->tooltip);
         } else {
             g_free(state->text);
             state->text = g_strdup("Monitor");
+            g_free(state->ram_text);
+            state->ram_text = g_strdup("Monitor");
             state->cpu_hot = FALSE;
             gtk_widget_set_tooltip_text(state->label, "Monitor collection failed");
         }
@@ -203,6 +218,23 @@ start_refresh(MonitorState *state)
     g_object_unref(task);
 }
 
+static gboolean
+button_pressed(GtkWidget *widget, GdkEventButton *event, MonitorState *state)
+{
+    (void) widget;
+    if (state->removed || event->button != 3 || (event->state & GDK_CONTROL_MASK) != 0)
+        return FALSE;
+    if (event->type == GDK_2BUTTON_PRESS || event->type == GDK_3BUTTON_PRESS)
+        return TRUE;
+    if (event->type != GDK_BUTTON_PRESS)
+        return FALSE;
+
+    state->minimized = !state->minimized;
+    repaint(state, xfce_panel_plugin_get_mode(state->plugin) !=
+                   XFCE_PANEL_PLUGIN_MODE_HORIZONTAL);
+    return TRUE;
+}
+
 static void
 monitor_construct(XfcePanelPlugin *plugin)
 {
@@ -213,8 +245,15 @@ monitor_construct(XfcePanelPlugin *plugin)
     g_cond_init(&state->worker_done);
     state->plugin = plugin;
     state->text = g_strdup("Monitor…");
+    state->ram_text = g_strdup("Monitor");
     state->label = gtk_label_new(state->text);
-    gtk_container_add(GTK_CONTAINER(plugin), state->label);
+    GtkWidget *event_box = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(event_box), FALSE);
+    gtk_widget_add_events(event_box, GDK_BUTTON_PRESS_MASK);
+    g_signal_connect_data(event_box, "button-press-event", G_CALLBACK(button_pressed),
+                          state_ref(state), button_state_unref, 0);
+    gtk_container_add(GTK_CONTAINER(event_box), state->label);
+    gtk_container_add(GTK_CONTAINER(plugin), event_box);
     g_object_set_data_full(G_OBJECT(plugin), "rust-monitor-state", state,
                            state_destroy);
     g_signal_connect(plugin, "free-data", G_CALLBACK(removed), state);
@@ -226,6 +265,7 @@ monitor_construct(XfcePanelPlugin *plugin)
     xfce_panel_plugin_set_expand(plugin, FALSE);
     mode_changed(plugin, xfce_panel_plugin_get_mode(plugin), state);
     gtk_widget_show(state->label);
+    gtk_widget_show(event_box);
     start_refresh(state);
 }
 

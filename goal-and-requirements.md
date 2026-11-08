@@ -25,6 +25,7 @@ Checking CPU temperature, fan speed, memory headroom, and disk capacity should n
 - Add metrics through executable scripts returning metric values.
 - Provide build, installation, and configuration instructions for personal use.
 - Show metrics inline with hover details; omit missing readings rather than displaying N/A.
+- Toggle between the full display and RAM-only by right-click, independently per running instance; Ctrl+right-click retains the panel menu.
 - Reload a shared local configuration file for sensor selection, filesystem paths, script extensions, and refresh delay.
 
 ## Tech Notes

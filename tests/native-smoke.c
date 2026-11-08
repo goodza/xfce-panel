@@ -20,7 +20,7 @@ typedef XfcePanelPlugin *(*Construct)(const gchar *, gint, const gchar *,
 static void
 watchdog(int signal_number)
 {
-    static const char message[] = "FAIL: native smoke global watchdog (40 seconds)\n";
+    static const char message[] = "FAIL: native smoke global watchdog (70 seconds)\n";
     (void) signal_number;
     (void) write(STDERR_FILENO, message, sizeof message - 1);
     _exit(124);
@@ -97,6 +97,60 @@ await_warning(GtkWidget *label, const gchar *text, gboolean hot)
     return FALSE;
 }
 
+/* Dispatch a real button event to the realized child, not a callback shortcut. */
+static GdkEvent *
+button_event(GtkWidget *box, GdkEventType type, guint button, guint modifiers)
+{
+    GdkEvent *event = gdk_event_new(type);
+    GdkWindow *window = gtk_widget_get_window(box);
+    GList *children = gdk_window_get_children(window);
+    for (GList *p = children; p != NULL; p = p->next) {
+        gpointer owner = NULL;
+        gdk_window_get_user_data(p->data, &owner);
+        if (owner == box) {
+            window = p->data;
+            break;
+        }
+    }
+    event->button.window = g_object_ref(window);
+    g_list_free(children);
+    event->button.send_event = TRUE;
+    event->button.time = GDK_CURRENT_TIME;
+    event->button.button = button;
+    event->button.state = modifiers;
+    gdk_event_set_device(event, gdk_seat_get_pointer(
+        gdk_display_get_default_seat(gtk_widget_get_display(box))));
+    return event;
+}
+
+static gboolean
+press(GtkWidget *box, GdkEventType type, guint button, guint modifiers)
+{
+    GdkEvent *event = button_event(box, type, button, modifiers);
+    gboolean handled = gtk_widget_event(box, event);
+    gdk_event_free(event);
+    return handled;
+}
+
+static gboolean
+parent_press(GtkWidget *widget, GdkEventButton *event, gpointer data)
+{
+    (void) widget;
+    (void) event;
+    *(gboolean *) data = TRUE;
+    return TRUE; /* Observe propagation without opening an XFCE menu. */
+}
+
+static gboolean
+ram_only(GtkWidget *label)
+{
+    const gchar *text = gtk_label_get_text(GTK_LABEL(label));
+    gchar *end = NULL;
+    double ram = g_ascii_strtod(text, &end);
+    return end != text && ram >= 0 && g_str_equal(end, " GiB") &&
+           cpu_color_matches(label, FALSE);
+}
+
 static gboolean
 put(const gchar *path, const gchar *contents)
 {
@@ -117,7 +171,7 @@ main(int argc, char **argv)
     gchar *cpu = NULL, *fan = NULL, *fan2 = NULL, *script = NULL, *started = NULL;
     gchar *survived = NULL, *contents = NULL, *tooltip = NULL, *inline_text = NULL;
     gchar *pid_text = NULL;
-    GtkWidget *window = NULL, *label;
+    GtkWidget *window = NULL, *label, *box;
     XfcePanelPlugin *plugin;
     GModule *module = NULL;
     Construct construct = NULL;
@@ -125,7 +179,7 @@ main(int argc, char **argv)
     action.sa_handler = watchdog;
     sigemptyset(&action.sa_mask);
     sigaction(SIGALRM, &action, NULL);
-    alarm(40);
+    alarm(70);
 
     CHECK(argc == 2, "plugin path argument supplied");
     root = g_dir_make_tmp("rust-monitor-native-XXXXXX", &error);
@@ -194,8 +248,57 @@ main(int argc, char **argv)
           strstr(tooltip, "Fan 1 (") && strstr(tooltip, "Fan 2 (") &&
           strstr(tooltip, "9876 RPM") && strstr(tooltip, "RAM "),
           "trusted angle-bracket output is literal label and plain-text tooltip");
-    g_clear_pointer(&tooltip, g_free);
+    box = gtk_widget_get_parent(label);
+    CHECK(GTK_IS_EVENT_BOX(box) &&
+          !gtk_event_box_get_visible_window(GTK_EVENT_BOX(box)),
+          "label wrapped in invisible-window event box");
     inline_text = g_strdup(text);
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label),
+          "ordinary right-click immediately selects only available RAM");
+    gchar *same_tooltip = gtk_widget_get_tooltip_text(label);
+    CHECK(g_strcmp0(same_tooltip, tooltip) == 0, "toggle preserves complete plain-text tooltip");
+    g_free(same_tooltip);
+    CHECK(!press(box, GDK_BUTTON_PRESS, 3, GDK_CONTROL_MASK) &&
+          !press(box, GDK_BUTTON_PRESS, 1, 0) &&
+          !press(box, GDK_BUTTON_PRESS, 2, 0) && ram_only(label),
+          "Ctrl-right-click and other buttons are unhandled without toggling");
+    CHECK(press(box, GDK_2BUTTON_PRESS, 3, 0) &&
+          press(box, GDK_3BUTTON_PRESS, 3, 0) && ram_only(label),
+          "extra right-button multi-click events are consumed without toggling");
+    guint signal_id = g_signal_lookup("button-press-event", GTK_TYPE_WIDGET);
+    g_signal_handlers_block_matched(plugin, G_SIGNAL_MATCH_ID, signal_id, 0, NULL, NULL, NULL);
+    gboolean propagated = FALSE;
+    gulong observer = g_signal_connect(plugin, "button-press-event", G_CALLBACK(parent_press), &propagated);
+    GdkEvent *event = button_event(box, GDK_BUTTON_PRESS, 3, GDK_CONTROL_MASK);
+    gtk_propagate_event(box, event);
+    gdk_event_free(event);
+    gboolean ctrl_propagated = propagated;
+    propagated = FALSE;
+    event = button_event(box, GDK_BUTTON_PRESS, 3, 0);
+    gtk_propagate_event(box, event);
+    gtk_propagate_event(box, event);
+    gdk_event_free(event);
+    event = button_event(box, GDK_2BUTTON_PRESS, 3, 0);
+    gtk_propagate_event(box, event);
+    gdk_event_free(event);
+    event = button_event(box, GDK_3BUTTON_PRESS, 3, 0);
+    gtk_propagate_event(box, event);
+    gdk_event_free(event);
+    gboolean ordinary_consumed = !propagated;
+    g_signal_handler_disconnect(plugin, observer);
+    g_signal_handlers_unblock_matched(plugin, G_SIGNAL_MATCH_ID, signal_id, 0, NULL, NULL, NULL);
+    CHECK(ctrl_propagated && ram_only(label), "GTK propagates Ctrl-right-click to parent without menu popup");
+    CHECK(ordinary_consumed, "GTK stops ordinary and multi-click right presses before parent panel handler");
+    for (guint i = 0; i < 10; i++)
+        CHECK(press(box, GDK_BUTTON_PRESS, 3, 0), "rapid right-click handled");
+    CHECK(ram_only(label), "rapid even toggles preserve minimized state");
+    g_signal_emit_by_name(plugin, "mode-changed", XFCE_PANEL_PLUGIN_MODE_DESKBAR);
+    CHECK(ram_only(label), "minimized deskbar remains RAM-only without CPU color");
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) &&
+          strchr(gtk_label_get_text(GTK_LABEL(label)), '\n') == NULL,
+          "return to full uses current actual horizontal mode");
+    CHECK(g_str_equal(gtk_label_get_text(GTK_LABEL(label)), inline_text), "return restores cached full text");
+    g_clear_pointer(&tooltip, g_free);
     g_signal_emit_by_name(plugin, "mode-changed", XFCE_PANEL_PLUGIN_MODE_DESKBAR);
     CHECK(strchr(gtk_label_get_text(GTK_LABEL(label)), '\n') &&
           !strstr(gtk_label_get_text(GTK_LABEL(label)), " · "),
@@ -226,6 +329,24 @@ main(int argc, char **argv)
     CHECK(put(cpu, "81000\n") && await_warning(label, "81.0 °C", TRUE),
           "warning color returns above threshold before sensor removal");
 
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label),
+          "hot CPU warning is absent in RAM-only mode");
+    CHECK(put(cpu, "80001\n"), "hot CPU changes while minimized");
+    gint64 hot_deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+    do {
+        g_clear_pointer(&tooltip, g_free);
+        tooltip = gtk_widget_get_tooltip_text(label);
+        if (tooltip && strstr(tooltip, "CPU 80.0 °C"))
+            break;
+        pump();
+    } while (g_get_monotonic_time() < hot_deadline);
+    CHECK(tooltip && strstr(tooltip, "CPU 80.0 °C") && ram_only(label),
+          "live polling updates tooltip and hot cache while remaining RAM-only");
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && cpu_color_matches(label, TRUE) &&
+          strstr(gtk_label_get_text(GTK_LABEL(label)), "80.0 °C"),
+          "return to full restores current hot CPU from cache");
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label), "minimized before config reload");
+
     contents = g_strdup_printf(
         "interval_seconds = 1\ncpu_sensor = '%s/missing-cpu'\n"
         "fan_sensors = ['%s/missing-fan']\ndisks = ['/']\n"
@@ -242,6 +363,8 @@ main(int argc, char **argv)
             break;
         pump();
     } while (g_get_monotonic_time() < deadline);
+    CHECK(ram_only(label), "config reload and live memory snapshots preserve RAM-only selection");
+    CHECK(press(box, GDK_BUTTON_PRESS, 3, 0), "restore full after minimized reload");
     text = gtk_label_get_text(GTK_LABEL(label));
     CHECK(tooltip && strstr(tooltip, "Extension Broken: exit") &&
           strstr(tooltip, "7") && strstr(tooltip, "missing-cpu") &&
