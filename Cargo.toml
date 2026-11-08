@@ -1,0 +1,16 @@
+[package]
+name = "xfce-rust-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "rust-monitor"
+path = "src/bin/rust-monitor.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
