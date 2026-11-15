@@ -6,7 +6,7 @@ Extensible Linux system metrics in the XFCE4 panel: CPU temperature, fan RPM, av
 54.0 °C · 1240 RPM · 8.20 GiB · / 62%
 ```
 
-Metrics appear inline without CPU, first-fan, or RAM labels; hover retains full labels and diagnostics. The second fan is tooltip-only (numbering follows sorted configured/discovered sensor paths). CPU temperature turns red strictly above 80°C and returns to normal at or below 80°C or when unavailable. The threshold uses the raw reading, so a value rounded to 80.0°C can still be red. Other metrics keep their normal color. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. Right-click toggles full display ↔ RAM-only; Ctrl+right-click passes through to XFCE's plugin menu. Each instance starts full and remembers the selection only until it is removed or the panel restarts. Hover details and polling continue in either view. RAM-only mode never inherits the CPU warning color; returning full restores the current warning. Until RAM is available, minimized mode shows Monitor with diagnostics. There is no Applications menu or settings dialog. A separate **fan icon toggle** enables optional ThinkPad smart fan control and remains visible in RAM-only mode; see [Smart fan control](#smart-fan-control) before enabling it.
+Metrics appear inline without CPU, first-fan, or RAM labels; hover retains full labels and diagnostics. The second fan is tooltip-only (numbering follows sorted configured/discovered sensor paths). CPU temperature turns red strictly above 80°C and returns to normal at or below 80°C or when unavailable. The threshold uses the raw reading, so a value rounded to 80.0°C can still be red. Other metrics keep their normal color. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. Right-click toggles full display ↔ RAM-only; Ctrl+right-click passes through to XFCE's plugin menu. Each instance starts full and remembers the selection only until it is removed or the panel restarts. Hover details and polling continue in either view. RAM-only mode never inherits the CPU warning color; returning full restores the current warning. Until RAM is available, minimized mode shows Monitor with diagnostics. There is no Applications menu or general settings dialog; left-clicking the readings opens the fan temperature controls. A separate **fan icon toggle** enables optional ThinkPad smart fan control and remains visible in RAM-only mode; see [Smart fan control](#smart-fan-control) before enabling it.
 
 ## Try without installing
 
@@ -32,7 +32,7 @@ make
 
 Requires XFCE4 panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
 
-**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. A second test module uses a simulated fan backend to verify nonblocking toggles, independent polling, failure/retry, rapid off/on transitions, and teardown without sudo or hardware writes. Staged installation also passes. Real fan writes, sudo authorization, actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
+**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. A second test module uses a simulated fan backend to verify nonblocking toggles, independent polling, failure/retry, rapid off/on transitions, and teardown without sudo or hardware writes. Popup tests cover slider bounds, per-instance reload, invalid settings, save failure/recovery, and teardown with default and disabled animations. Escape is tested by injecting GTK's key signal; physical keyboard and outside-click routing still need a live-panel check. Staged installation also passes. Real fan writes, sudo authorization, actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
 
 ```sh
 make test-native
@@ -52,7 +52,7 @@ make PREFIX=/usr LIBDIR="$PANEL_LIBDIR"
 sudo make install PREFIX=/usr LIBDIR="$PANEL_LIBDIR"
 ```
 
-Then open **Panel → Add New Items → Rust Monitor**. If not listed, restart the panel yourself with `xfce4-panel -r` and reopen the item list. Installation does not add an item or restart your panel automatically. Multiple instances share one configuration file.
+Then open **Panel → Add New Items → Rust Monitor**. If not listed, restart the panel yourself with `xfce4-panel -r` and reopen the item list. Installation does not add an item or restart your panel automatically. Multiple instances share the metric/sensor configuration file but save their fan temperature ranges separately.
 
 For staging without touching system files:
 
@@ -102,11 +102,20 @@ timeout_ms = 1000
 
 Click the fan icon to enable or disable control. It starts **off** each time the plugin starts, without saving its state. The pressed icon indicates enabled control; hover over it for the latest action or error. Metric right-click behavior is unchanged.
 
+**Left-click the readings** (also in RAM-only mode) to open two temperature sliders:
+
+- **Fan off below:** lower threshold, initially **58°C**.
+- **Automatic above:** upper threshold, initially **60°C**.
+
+Both sliders use 1°C steps from 30–90°C. They cannot cross: the lower threshold stays at least 1°C below the upper. Changes apply on the next fan check while dragging; an in-flight check may finish with its previous range. Adjusting the range never enables fan control. Click outside or press Escape to close the popup. The red CPU display warning stays fixed at >80°C.
+
+Each panel instance remembers its range in XFCE's per-instance rc file, separately from `rust-monitor.toml`; fan enablement still starts off. Missing saved settings use 58–60°C. Invalid saved settings show a warning and use those defaults. If saving fails, the selected range still works for this session and the popup shows **Not saved**; the next adjustment retries. Existing malformed rc files are not overwritten. Manual rc edits take effect when the instance restarts.
+
 While enabled, a separate background check runs immediately, then two seconds after each check completes, independently of metric scripts and `interval_seconds`:
 
-- CPU **>60°C** → write `level auto`.
-- CPU **<58°C** **and** ThinkPad fan speed **<2000 RPM** → write `level 0`.
-- Otherwise leave the level unchanged. Bounds are strict: exactly 60°C, 58°C, or 2000 RPM does not trigger the corresponding transition.
+- CPU **above the upper threshold** → write `level auto`.
+- CPU **below the lower threshold** **and** ThinkPad fan speed **<2000 RPM** → write `level 0`.
+- Otherwise leave the level unchanged. Bounds are strict: exactly a selected threshold or 2000 RPM does not trigger its corresponding transition.
 
 CPU selection follows `cpu_sensor` or normal hottest-CPU discovery. Control RPM comes from `speed:` in `/proc/acpi/ibm/fan`, regardless of `fan_sensors` or the displayed fan metric. Missing/invalid readings, invalid configuration, or command failures attempt automatic control, report the failure/fallback result in the icon tooltip, and keep retrying while enabled. Each command has a one-second timeout.
 
@@ -158,6 +167,7 @@ For the remaining live-panel checks:
 3. Edit the config and verify reload, invalid-config diagnostics, explicit sensors, and additional filesystems.
 4. Add a successful script, failing script, and timed-out script; verify hidden failures and tooltip errors.
 5. Check horizontal, vertical, and deskbar panels, then remove the item while a script runs and confirm no extension remains running.
-6. On supported hardware only, configure the narrow sudo permission yourself, enable the fan icon, and inspect its tooltip and actual fan state. Confirm it stays accessible in RAM-only mode. After disabling/removing it, restore `level auto` manually; this checklist does not authorize automated hardware changes.
+6. Left-click readings and adjust both sliders in full and RAM-only views. Check outside-click/Escape dismissal, popup placement in each panel orientation, saved ranges after restart, and independent ranges on two instances. Changing a range must not enable control.
+7. On supported hardware only, configure the narrow sudo permission yourself, enable the fan icon, and inspect its tooltip and actual fan state. Confirm it stays accessible in RAM-only mode. After disabling/removing it, restore `level auto` manually; this checklist does not authorize automated hardware changes.
 
 See `architecture.md` for the lifecycle and extension contracts.
