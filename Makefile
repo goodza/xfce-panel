@@ -74,6 +74,8 @@ test-native: $(PLUGIN) $(FAN_TEST_PLUGIN)
 		-o "$(NATIVE_BUILD_DIR)/native-smoke"
 	"$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(PLUGIN))"
 	"$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(FAN_TEST_PLUGIN))" --fan-stub
+	RUST_MONITOR_TEST_NO_ANIMATIONS=1 "$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(PLUGIN))"
+	RUST_MONITOR_TEST_NO_ANIMATIONS=1 "$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(FAN_TEST_PLUGIN))" --fan-stub
 
 clean:
 	$(CARGO) clean --target-dir "$(CARGO_TARGET_DIR)"

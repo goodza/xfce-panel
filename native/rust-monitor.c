@@ -15,6 +15,17 @@ typedef struct {
     gboolean fan_worker_running;
     guint fan_timeout_id;
     guint fan_generation;
+    guint off_celsius;
+    guint auto_celsius;
+    GtkWidget *settings_popover;
+    GtkWidget *off_scale;
+    GtkWidget *auto_scale;
+    GtkWidget *settings_status;
+    gchar *settings_message;
+    gboolean updating_scales;
+    gboolean popup_autohide_blocked;
+    GtkWidget *settings_toplevel;
+    gulong toplevel_destroy_id;
     gchar *text;
     gchar *ram_text;
     gboolean minimized;
@@ -45,6 +56,7 @@ state_unref(gpointer data)
     if (g_atomic_int_dec_and_test(&state->refs)) {
         g_free(state->text);
         g_free(state->ram_text);
+        g_free(state->settings_message);
         g_cond_clear(&state->worker_done);
         g_mutex_clear(&state->worker_mutex);
         g_free(state);
@@ -62,6 +74,23 @@ static void
 stop_refresh(MonitorState *state)
 {
     state->removed = TRUE;
+    if (state->settings_toplevel != NULL) {
+        g_signal_handler_disconnect(state->settings_toplevel, state->toplevel_destroy_id);
+        state->settings_toplevel = NULL;
+        state->toplevel_destroy_id = 0;
+    }
+    if (state->settings_popover != NULL) {
+        GtkWidget *toplevel = gtk_widget_get_toplevel(state->settings_popover);
+        gtk_widget_hide(state->settings_popover);
+        if (GTK_IS_WINDOW(toplevel)) {
+            GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(toplevel));
+            if (focus != NULL &&
+                (gtk_widget_is_ancestor(focus, GTK_WIDGET(state->plugin)) ||
+                 gtk_widget_is_ancestor(focus, state->settings_popover)))
+                gtk_window_set_focus(GTK_WINDOW(toplevel), NULL);
+        }
+        gtk_widget_destroy(state->settings_popover);
+    }
     state->label = NULL;
     state->content = NULL;
     state->fan_button = NULL;
@@ -235,11 +264,225 @@ start_refresh(MonitorState *state)
     g_object_unref(task);
 }
 
+static void
+settings_message(MonitorState *state, const gchar *message)
+{
+    g_free(state->settings_message);
+    state->settings_message = g_strdup(message);
+    if (state->settings_status != NULL)
+        gtk_label_set_text(GTK_LABEL(state->settings_status), message);
+}
+
+static gboolean
+valid_range(gint off, gint automatic)
+{
+    return off >= 30 && off < automatic && automatic <= 90;
+}
+
+static void
+load_range(MonitorState *state)
+{
+    gchar *path = xfce_panel_plugin_lookup_rc_file(state->plugin);
+    GKeyFile *settings = g_key_file_new();
+    GError *error = NULL;
+    state->off_celsius = 58;
+    state->auto_celsius = 60;
+    settings_message(state, "Changes apply on the next fan check.");
+    if (path != NULL) {
+        if (g_key_file_load_from_file(settings, path, G_KEY_FILE_NONE, &error) &&
+            g_key_file_has_group(settings, "SmartFan")) {
+            gint off = g_key_file_get_integer(settings, "SmartFan", "off-celsius", &error);
+            gint automatic = error == NULL ?
+                g_key_file_get_integer(settings, "SmartFan", "auto-celsius", &error) : 0;
+            if (error == NULL && valid_range(off, automatic)) {
+                state->off_celsius = (guint) off;
+                state->auto_celsius = (guint) automatic;
+            } else if (error == NULL) {
+                g_set_error_literal(&error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_INVALID_VALUE,
+                                    "require 30 <= off < auto <= 90 °C");
+            }
+        }
+        if (error != NULL) {
+            gchar *message = g_strdup_printf("Saved range unavailable: %s\nUsing defaults: 58–60 °C.",
+                                              error->message);
+            settings_message(state, message);
+            g_free(message);
+        }
+    }
+    g_clear_error(&error);
+    g_key_file_unref(settings);
+    g_free(path);
+}
+
+static void
+save_range(MonitorState *state)
+{
+    gchar *path = xfce_panel_plugin_save_location(state->plugin, TRUE);
+    GKeyFile *settings = g_key_file_new();
+    GError *error = NULL;
+    gchar *contents = NULL;
+    gsize length = 0;
+    if (path == NULL) {
+        g_set_error_literal(&error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                            "panel settings location unavailable");
+    } else if (!g_key_file_load_from_file(settings, path,
+                G_KEY_FILE_KEEP_COMMENTS | G_KEY_FILE_KEEP_TRANSLATIONS, &error) &&
+               g_error_matches(error, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
+        g_clear_error(&error);
+    }
+    if (error == NULL) {
+        g_key_file_set_integer(settings, "SmartFan", "off-celsius", (gint) state->off_celsius);
+        g_key_file_set_integer(settings, "SmartFan", "auto-celsius", (gint) state->auto_celsius);
+        contents = g_key_file_to_data(settings, &length, &error);
+        if (error == NULL) {
+            GFile *file = g_file_new_for_path(path);
+            g_file_replace_contents(file, contents, length, NULL, FALSE,
+                                    G_FILE_CREATE_PRIVATE, NULL, NULL, &error);
+            g_object_unref(file);
+        }
+    }
+    if (error != NULL) {
+        gchar *message = g_strdup_printf("Not saved: %s\nUsing this range for this session.",
+                                          error->message);
+        settings_message(state, message);
+        g_free(message);
+    } else {
+        settings_message(state, "Range saved for this panel instance.");
+    }
+    g_clear_error(&error);
+    g_free(contents);
+    g_key_file_unref(settings);
+    g_free(path);
+}
+
+static void
+range_changed(GtkRange *range, MonitorState *state)
+{
+    if (state->removed || state->updating_scales)
+        return;
+    guint value = (guint) (gtk_range_get_value(range) + 0.5);
+    if (GTK_WIDGET(range) == state->off_scale)
+        state->off_celsius = MIN(value, state->auto_celsius - 1);
+    else
+        state->auto_celsius = MAX(value, state->off_celsius + 1);
+    state->updating_scales = TRUE;
+    gtk_range_set_value(GTK_RANGE(state->off_scale), state->off_celsius);
+    gtk_range_set_value(GTK_RANGE(state->auto_scale), state->auto_celsius);
+    state->updating_scales = FALSE;
+    save_range(state);
+}
+
+static void
+popover_hidden(GtkWidget *widget, MonitorState *state)
+{
+    (void) widget;
+    if (state->popup_autohide_blocked) {
+        xfce_panel_plugin_block_autohide(state->plugin, FALSE);
+        state->popup_autohide_blocked = FALSE;
+    }
+}
+
+static void
+popover_shown(GtkWidget *widget, MonitorState *state)
+{
+    (void) widget;
+    if (!state->popup_autohide_blocked) {
+        xfce_panel_plugin_block_autohide(state->plugin, TRUE);
+        state->popup_autohide_blocked = TRUE;
+    }
+}
+
+static void
+popover_destroyed(GtkWidget *widget, MonitorState *state)
+{
+    popover_hidden(widget, state);
+    state->settings_popover = NULL;
+    state->off_scale = NULL;
+    state->auto_scale = NULL;
+    state->settings_status = NULL;
+}
+
+static void
+settings_toplevel_destroyed(GtkWidget *widget, MonitorState *state)
+{
+    state->settings_toplevel = NULL;
+    state->toplevel_destroy_id = 0;
+    if (state->settings_popover != NULL)
+        gtk_widget_hide(state->settings_popover);
+    gtk_window_set_focus(GTK_WINDOW(widget), NULL);
+}
+
+static GtkWidget *
+temperature_scale(const gchar *name, guint value)
+{
+    GtkWidget *scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 30, 90, 1);
+    gtk_widget_set_name(scale, name);
+    gtk_scale_set_digits(GTK_SCALE(scale), 0);
+    gtk_range_set_round_digits(GTK_RANGE(scale), 0);
+    gtk_range_set_value(GTK_RANGE(scale), value);
+    gtk_scale_set_value_pos(GTK_SCALE(scale), GTK_POS_RIGHT);
+    gtk_widget_set_size_request(scale, 280, -1);
+    return scale;
+}
+
+static void
+construct_settings(MonitorState *state, GtkWidget *anchor)
+{
+    state->settings_popover = gtk_popover_new(anchor);
+    GtkWidget *toplevel = gtk_widget_get_toplevel(anchor);
+    if (GTK_IS_WINDOW(toplevel)) {
+        state->settings_toplevel = toplevel;
+        state->toplevel_destroy_id = g_signal_connect_data(
+            toplevel, "destroy", G_CALLBACK(settings_toplevel_destroyed),
+            state_ref(state), button_state_unref, 0);
+    }
+    gtk_widget_set_name(state->settings_popover, "fan-temperature-settings");
+    gtk_popover_set_position(GTK_POPOVER(state->settings_popover), GTK_POS_BOTTOM);
+    g_signal_connect_data(state->settings_popover, "show", G_CALLBACK(popover_shown),
+                          state_ref(state), button_state_unref, 0);
+    g_signal_connect_data(state->settings_popover, "hide", G_CALLBACK(popover_hidden),
+                          state_ref(state), button_state_unref, 0);
+    g_signal_connect_data(state->settings_popover, "destroy", G_CALLBACK(popover_destroyed),
+                          state_ref(state), button_state_unref, 0);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 12);
+    gtk_box_pack_start(GTK_BOX(box), gtk_label_new("Smart fan temperature range"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), gtk_label_new("Fan off below (°C)"), FALSE, FALSE, 0);
+    state->off_scale = temperature_scale("fan-off-temperature", state->off_celsius);
+    gtk_box_pack_start(GTK_BOX(box), state->off_scale, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), gtk_label_new("Automatic above (°C)"), FALSE, FALSE, 0);
+    state->auto_scale = temperature_scale("fan-auto-temperature", state->auto_celsius);
+    gtk_box_pack_start(GTK_BOX(box), state->auto_scale, FALSE, FALSE, 0);
+    atk_object_set_name(gtk_widget_get_accessible(state->off_scale), "Fan off below, degrees Celsius");
+    atk_object_set_name(gtk_widget_get_accessible(state->auto_scale), "Automatic above, degrees Celsius");
+    g_signal_connect_data(state->off_scale, "value-changed", G_CALLBACK(range_changed),
+                          state_ref(state), button_state_unref, 0);
+    g_signal_connect_data(state->auto_scale, "value-changed", G_CALLBACK(range_changed),
+                          state_ref(state), button_state_unref, 0);
+    GtkWidget *hint = gtk_label_new("30–90 °C, in 1 °C steps.\nFan off also requires RPM < 2000.\nBetween thresholds, leave the level unchanged.");
+    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
+    state->settings_status = gtk_label_new(state->settings_message);
+    gtk_widget_set_name(state->settings_status, "fan-settings-status");
+    gtk_label_set_line_wrap(GTK_LABEL(state->settings_status), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(state->settings_status), 45);
+    gtk_box_pack_start(GTK_BOX(box), state->settings_status, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(state->settings_popover), box);
+    gtk_widget_show_all(box);
+}
+
 static gboolean
 button_pressed(GtkWidget *widget, GdkEventButton *event, MonitorState *state)
 {
     (void) widget;
-    if (state->removed || event->button != 3 || (event->state & GDK_CONTROL_MASK) != 0)
+    if (state->removed || (event->state & GDK_CONTROL_MASK) != 0)
+        return FALSE;
+    if (event->button == 1) {
+        if (event->type == GDK_BUTTON_PRESS && state->settings_popover != NULL)
+            gtk_popover_popup(GTK_POPOVER(state->settings_popover));
+        return event->type == GDK_BUTTON_PRESS || event->type == GDK_2BUTTON_PRESS ||
+               event->type == GDK_3BUTTON_PRESS;
+    }
+    if (event->button != 3)
         return FALSE;
     if (event->type == GDK_2BUTTON_PRESS || event->type == GDK_3BUTTON_PRESS)
         return TRUE;
@@ -255,6 +498,8 @@ button_pressed(GtkWidget *widget, GdkEventButton *event, MonitorState *state)
 typedef struct {
     MonitorState *state;
     guint generation;
+    guint off_celsius;
+    guint auto_celsius;
 } FanJob;
 
 static void
@@ -278,7 +523,7 @@ fan_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cance
     MonitorState *state = job->state;
     (void) source;
     (void) cancel;
-    gchar *status = monitor_fan_step(58, 60);
+    gchar *status = monitor_fan_step(job->off_celsius, job->auto_celsius);
     g_mutex_lock(&state->worker_mutex);
     state->fan_worker_running = FALSE;
     g_cond_broadcast(&state->worker_done);
@@ -330,6 +575,8 @@ start_fan_refresh(MonitorState *state)
     FanJob *job = g_new0(FanJob, 1);
     job->state = state_ref(state);
     job->generation = state->fan_generation;
+    job->off_celsius = state->off_celsius;
+    job->auto_celsius = state->auto_celsius;
     GTask *task = g_task_new(state->plugin, NULL, fan_done, NULL);
     g_task_set_task_data(task, job, fan_job_free);
     g_task_run_in_thread(task, fan_worker);
@@ -386,6 +633,7 @@ monitor_construct(XfcePanelPlugin *plugin)
     g_mutex_init(&state->worker_mutex);
     g_cond_init(&state->worker_done);
     state->plugin = plugin;
+    load_range(state);
     state->text = g_strdup("Monitor…");
     state->ram_text = g_strdup("Monitor");
     state->label = gtk_label_new(state->text);
@@ -410,6 +658,7 @@ monitor_construct(XfcePanelPlugin *plugin)
     gtk_box_pack_start(GTK_BOX(state->content), event_box, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(state->content), state->fan_button, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(plugin), state->content);
+    construct_settings(state, event_box);
     g_object_set_data_full(G_OBJECT(plugin), "rust-monitor-state", state,
                            state_destroy);
     g_signal_connect(plugin, "free-data", G_CALLBACK(removed), state);

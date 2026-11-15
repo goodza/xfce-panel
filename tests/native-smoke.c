@@ -67,6 +67,54 @@ find_toggle(GtkWidget *widget)
     return NULL;
 }
 
+typedef struct {
+    const gchar *name;
+    GtkWidget *found;
+} FindWidget;
+
+static void
+find_named_child(GtkWidget *widget, gpointer data)
+{
+    FindWidget *search = data;
+    if (search->found != NULL)
+        return;
+    if (g_str_equal(gtk_widget_get_name(widget), search->name))
+        search->found = widget;
+    else if (GTK_IS_CONTAINER(widget))
+        gtk_container_forall(GTK_CONTAINER(widget), find_named_child, search);
+}
+
+static GtkWidget *
+find_named(GtkWidget *widget, const gchar *name)
+{
+    FindWidget search = { name, NULL };
+    find_named_child(widget, &search);
+    return search.found;
+}
+
+static gboolean
+probe_range(Construct construct, gint id, gint off, gint automatic, const gchar *warning)
+{
+    XfcePanelPlugin *plugin = construct("rust-monitor", id, "Range probe", "Isolated test",
+                                       NULL, gdk_screen_get_default());
+    if (plugin == NULL)
+        return FALSE;
+    GtkWidget *window = gtk_offscreen_window_new();
+    gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(plugin));
+    gtk_widget_show_all(window);
+    GtkWidget *low = find_named(window, "fan-off-temperature");
+    GtkWidget *high = find_named(window, "fan-auto-temperature");
+    GtkWidget *status = find_named(window, "fan-settings-status");
+    GtkWidget *toggle = find_toggle(GTK_WIDGET(plugin));
+    gboolean valid = low != NULL && high != NULL && status != NULL && toggle != NULL &&
+        gtk_range_get_value(GTK_RANGE(low)) == off &&
+        gtk_range_get_value(GTK_RANGE(high)) == automatic &&
+        !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(toggle)) &&
+        (warning == NULL || strstr(gtk_label_get_text(GTK_LABEL(status)), warning) != NULL);
+    gtk_widget_destroy(window);
+    return valid;
+}
+
 static gboolean
 await_tooltip(GtkWidget *widget, const gchar *needle)
 {
@@ -92,6 +140,13 @@ await_counter(gint (*counter)(void), gint minimum)
         pump();
     } while (g_get_monotonic_time() < deadline);
     return FALSE;
+}
+
+static void
+observe_destroy(GtkWidget *widget, gpointer data)
+{
+    (void) widget;
+    *(gboolean *) data = TRUE;
 }
 
 static gboolean
@@ -176,6 +231,28 @@ press(GtkWidget *box, GdkEventType type, guint button, guint modifiers)
 }
 
 static gboolean
+dismiss_popup_via_key_signal(GtkWidget *popover)
+{
+    GdkEvent *event = gdk_event_new(GDK_KEY_PRESS);
+    event->key.window = g_object_ref(gtk_widget_get_window(popover));
+    event->key.send_event = TRUE;
+    event->key.keyval = GDK_KEY_Escape;
+    gdk_event_set_device(event, gdk_seat_get_keyboard(
+        gdk_display_get_default_seat(gtk_widget_get_display(popover))));
+    gboolean handled = FALSE;
+    g_signal_emit_by_name(popover, "key-press-event", &event->key, &handled);
+    gdk_event_free(event);
+    gint64 deadline = g_get_monotonic_time() + G_TIME_SPAN_SECOND;
+    while (gtk_widget_get_visible(popover) && g_get_monotonic_time() < deadline)
+        pump();
+    if (!handled || gtk_widget_get_visible(popover))
+        g_printerr("Escape diagnostic: handled=%d visible=%d mapped=%d realized=%d\n",
+                   handled, gtk_widget_get_visible(popover), gtk_widget_get_mapped(popover),
+                   gtk_widget_get_realized(popover));
+    return handled && !gtk_widget_get_visible(popover);
+}
+
+static gboolean
 parent_press(GtkWidget *widget, GdkEventButton *event, gpointer data)
 {
     (void) widget;
@@ -209,11 +286,12 @@ int
 main(int argc, char **argv)
 {
     int result = 1;
+    gboolean popup_destroyed = FALSE;
     GError *error = NULL;
     gchar *root = NULL, *xfce = NULL, *panel = NULL, *config = NULL;
     gchar *cpu = NULL, *fan = NULL, *fan2 = NULL, *script = NULL, *started = NULL;
     gchar *survived = NULL, *contents = NULL, *tooltip = NULL, *inline_text = NULL;
-    gchar *pid_text = NULL;
+    gchar *pid_text = NULL, *range_rc = NULL;
     GtkWidget *window = NULL, *label, *box;
     XfcePanelPlugin *plugin;
     GModule *module = NULL;
@@ -252,6 +330,8 @@ main(int argc, char **argv)
     CHECK(put(config, contents), "initial isolated configuration written");
     g_clear_pointer(&contents, g_free);
     CHECK(gtk_init_check(NULL, NULL), "GTK display available (no skip)");
+    if (g_getenv("RUST_MONITOR_TEST_NO_ANIMATIONS") != NULL)
+        g_object_set(gtk_settings_get_default(), "gtk-enable-animations", FALSE, NULL);
     module = g_module_open(argv[1], G_MODULE_BIND_LOCAL);
     if (module == NULL)
         g_printerr("GModule: %s\n", g_module_error());
@@ -302,11 +382,96 @@ main(int argc, char **argv)
           "fan icon toggle is visible and starts off");
     CHECK(await_tooltip(fan_button, "last fan level left unchanged"),
           "off tooltip explains retained fan level");
+    GtkWidget *popover = find_named(window, "fan-temperature-settings");
+    GtkWidget *off_scale = find_named(window, "fan-off-temperature");
+    GtkWidget *auto_scale = find_named(window, "fan-auto-temperature");
+    GtkWidget *range_status = find_named(window, "fan-settings-status");
+    CHECK(popover != NULL && off_scale != NULL && auto_scale != NULL && range_status != NULL,
+          "temperature popup and both named sliders constructed");
+    CHECK(!gtk_widget_get_visible(popover) &&
+          gtk_range_get_value(GTK_RANGE(off_scale)) == 58 &&
+          gtk_range_get_value(GTK_RANGE(auto_scale)) == 60,
+          "popup starts closed with the default 58–60 C range");
+    CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover) &&
+          !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+          "left-click opens sliders without enabling smart control");
+    CHECK(dismiss_popup_via_key_signal(popover), "Escape key signal closes the freshly opened popup");
+    CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
+          "popup can reopen after Escape");
+    GtkAdjustment *adjustment = gtk_range_get_adjustment(GTK_RANGE(off_scale));
+    CHECK(gtk_adjustment_get_lower(adjustment) == 30 &&
+          gtk_adjustment_get_upper(adjustment) == 90 &&
+          gtk_adjustment_get_step_increment(adjustment) == 1 &&
+          gtk_scale_get_digits(GTK_SCALE(off_scale)) == 0,
+          "sliders expose integer 30–90 C bounds and one-degree steps");
+    gtk_range_set_value(GTK_RANGE(off_scale), 45);
+    gtk_range_set_value(GTK_RANGE(auto_scale), 70);
+    gtk_range_set_value(GTK_RANGE(off_scale), 90);
+    CHECK(gtk_range_get_value(GTK_RANGE(off_scale)) == 69,
+          "lower threshold clamps below upper rather than crossing it");
+    gtk_range_set_value(GTK_RANGE(auto_scale), 30);
+    CHECK(gtk_range_get_value(GTK_RANGE(auto_scale)) == 70,
+          "upper threshold clamps above lower rather than crossing it");
+    gtk_range_set_value(GTK_RANGE(off_scale), 45);
+    range_rc = xfce_panel_plugin_save_location(plugin, FALSE);
+    CHECK(range_rc != NULL && g_str_has_prefix(range_rc, root) &&
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Range saved"),
+          "range saved in isolated per-instance XFCE rc file");
+    CHECK(put(range_rc, "# Keep this comment\n[Other]\nkeep=value\n[SmartFan]\noff-celsius=45\nauto-celsius=70\n"),
+          "existing unrelated rc settings and comment seeded");
+    gtk_range_set_value(GTK_RANGE(off_scale), 46);
+    g_clear_pointer(&contents, g_free);
+    CHECK(g_file_get_contents(range_rc, &contents, NULL, NULL) &&
+          strstr(contents, "keep=value") && strstr(contents, "# Keep this comment") &&
+          strstr(contents, "off-celsius=46") && strstr(contents, "auto-celsius=70"),
+          "range writes preserve unrelated keys/comments and store both thresholds");
+    g_clear_pointer(&contents, g_free);
+    CHECK(g_unlink(range_rc) == 0 && g_mkdir(range_rc, 0700) == 0,
+          "unwritable settings target simulated with a directory");
+    gtk_range_set_value(GTK_RANGE(off_scale), 47);
+    CHECK(gtk_range_get_value(GTK_RANGE(off_scale)) == 47 &&
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Not saved") &&
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "this session"),
+          "failed save keeps session range and displays a warning");
+    CHECK(g_rmdir(range_rc) == 0, "save failure fixture removed");
+    gtk_range_set_value(GTK_RANGE(off_scale), 48);
+    CHECK(strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Range saved"),
+          "next adjustment retries saving and clears the error");
+    gtk_widget_hide(popover);
+    CHECK(!gtk_widget_get_visible(popover) &&
+          probe_range(construct, 27182, 48, 70, NULL) &&
+          probe_range(construct, 27183, 58, 60, NULL),
+          "reconstructed instance restores its range but starts off; another instance uses defaults");
+    CHECK(put(range_rc, "[SmartFan]\noff-celsius=90\nauto-celsius=30\n") &&
+          probe_range(construct, 27182, 58, 60, "Saved range unavailable"),
+          "invalid saved range uses defaults and surfaces a warning");
+    CHECK(put(range_rc, "malformed settings [") &&
+          probe_range(construct, 27182, 58, 60, "Saved range unavailable"),
+          "malformed settings also fall back visibly");
+    gtk_range_set_value(GTK_RANGE(off_scale), 47);
+    CHECK(g_file_get_contents(range_rc, &contents, NULL, NULL) &&
+          g_str_equal(contents, "malformed settings [") &&
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Not saved"),
+          "malformed rc is not silently overwritten; new range remains session-only");
+    g_clear_pointer(&contents, g_free);
+    CHECK(put(range_rc, "[SmartFan]\noff-celsius=30\nauto-celsius=31\n") &&
+          probe_range(construct, 27182, 30, 31, NULL) &&
+          put(range_rc, "[SmartFan]\noff-celsius=89\nauto-celsius=90\n") &&
+          probe_range(construct, 27182, 89, 90, NULL),
+          "extreme valid ranges reconstruct without GTK scale errors");
+    gtk_range_set_value(GTK_RANGE(off_scale), 46);
+    gtk_range_set_value(GTK_RANGE(off_scale), 47);
+    CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
+          "popup reopens after closing and persistence checks");
+    CHECK(dismiss_popup_via_key_signal(popover), "Escape key signal dismisses the temperature popup");
     if (argc == 3) {
         gint (*calls)(void) = NULL, (*running)(void) = NULL, (*overlap)(void) = NULL;
+        gint (*fan_off)(void) = NULL, (*fan_auto)(void) = NULL;
         CHECK(g_module_symbol(module, "smoke_fan_calls", (gpointer *) &calls) &&
               g_module_symbol(module, "smoke_fan_running", (gpointer *) &running) &&
-              g_module_symbol(module, "smoke_fan_overlap", (gpointer *) &overlap),
+              g_module_symbol(module, "smoke_fan_overlap", (gpointer *) &overlap) &&
+              g_module_symbol(module, "smoke_fan_off", (gpointer *) &fan_off) &&
+              g_module_symbol(module, "smoke_fan_auto", (gpointer *) &fan_auto),
               "test-only fan backend resolved (no hardware or sudo)");
         CHECK(calls() == 0, "disabled startup never invokes fan controller");
         g_clear_pointer(&contents, g_free);
@@ -324,14 +489,20 @@ main(int argc, char **argv)
         CHECK(g_get_monotonic_time() - before < 100000 &&
               gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
               "fan enable returns immediately without blocking GTK");
-        CHECK(await_counter(running, 1) && await_tooltip(fan_button, "simulated permission failure"),
-              "independent fan check reports failure while metric script is still running");
+        CHECK(await_counter(running, 1) && fan_off() == 47 && fan_auto() == 70,
+              "first worker receives a snapshot of the selected range");
+        gtk_range_set_value(GTK_RANGE(off_scale), 50);
+        gtk_range_set_value(GTK_RANGE(auto_scale), 75);
+        CHECK(fan_off() == 47 && fan_auto() == 70 &&
+              await_tooltip(fan_button, "simulated permission failure"),
+              "in-flight check keeps old range and reports failure during slow metrics");
         CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label) &&
               gtk_widget_get_visible(fan_button) &&
               gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
               "RAM-only mode leaves fan icon visible and enabled");
-        CHECK(await_tooltip(fan_button, "level auto (simulated)") && calls() >= 2,
-              "fan loop retries and recovers despite one-hour metric delay");
+        CHECK(await_tooltip(fan_button, "level auto (simulated)") && calls() >= 2 &&
+              fan_off() == 50 && fan_auto() == 75,
+              "next fan check receives new range and retries despite one-hour metric delay");
         CHECK(await_counter(calls, 3) && running() == 1,
               "next fan check starts for off-during-flight test");
         gtk_button_clicked(GTK_BUTTON(fan_button));
@@ -351,10 +522,13 @@ main(int argc, char **argv)
               await_counter(calls, stopped_calls + 2) && overlap() == 0,
               "rapid off/on toggles serialize checks and start a fresh generation");
         CHECK(await_counter(running, 1), "fan worker active before widget destruction");
+        g_signal_connect(popover, "destroy", G_CALLBACK(observe_destroy), &popup_destroyed);
+        CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
+              "popup opened before removal during fan work");
         before = g_get_monotonic_time();
         gtk_widget_destroy(window);
         window = NULL;
-        CHECK(running() == 0 && g_get_monotonic_time() - before < 2 * G_TIME_SPAN_SECOND,
+        CHECK(popup_destroyed && running() == 0 && g_get_monotonic_time() - before < 2 * G_TIME_SPAN_SECOND,
               "removal waits for fan worker without GTK deadlock or a restoration command");
         stopped_calls = calls();
         deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
@@ -365,16 +539,21 @@ main(int argc, char **argv)
         result = 0;
         goto cleanup;
     }
-    inline_text = g_strdup(text);
+    inline_text = g_strdup(gtk_label_get_text(GTK_LABEL(label)));
+    g_clear_pointer(&tooltip, g_free);
+    tooltip = gtk_widget_get_tooltip_text(label);
     CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label),
           "ordinary right-click immediately selects only available RAM");
+    CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover) && ram_only(label),
+          "left-click opens range controls in RAM-only mode without changing the view");
+    gtk_widget_hide(popover);
     gchar *same_tooltip = gtk_widget_get_tooltip_text(label);
     CHECK(g_strcmp0(same_tooltip, tooltip) == 0, "toggle preserves complete plain-text tooltip");
     g_free(same_tooltip);
     CHECK(!press(box, GDK_BUTTON_PRESS, 3, GDK_CONTROL_MASK) &&
-          !press(box, GDK_BUTTON_PRESS, 1, 0) &&
+          !press(box, GDK_BUTTON_PRESS, 1, GDK_CONTROL_MASK) &&
           !press(box, GDK_BUTTON_PRESS, 2, 0) && ram_only(label),
-          "Ctrl-right-click and other buttons are unhandled without toggling");
+          "Ctrl-modified clicks and middle button remain unhandled without toggling");
     CHECK(press(box, GDK_2BUTTON_PRESS, 3, 0) &&
           press(box, GDK_3BUTTON_PRESS, 3, 0) && ram_only(label),
           "extra right-button multi-click events are consumed without toggling");
@@ -508,9 +687,13 @@ main(int argc, char **argv)
     gint64 leader_pid = g_ascii_strtoll(pid_text, &pid_end, 10);
     CHECK(leader_pid > 0 && leader_pid <= G_MAXINT && pid_end != pid_text &&
           g_str_equal(pid_end, "\n"), "extension leader PID is valid");
+    g_signal_connect(popover, "destroy", G_CALLBACK(observe_destroy), &popup_destroyed);
+    CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
+          "popup opened before removal during metric work");
     gint64 before = g_get_monotonic_time();
     gtk_widget_destroy(window);
     window = NULL;
+    CHECK(popup_destroyed, "open popup is destroyed with the plugin");
     gint64 elapsed = g_get_monotonic_time() - before;
     g_print("Destroy waited %.1f ms\n", elapsed / 1000.0);
     CHECK(elapsed < 2 * G_TIME_SPAN_SECOND,
@@ -533,7 +716,9 @@ cleanup:
         pump();
     if (module != NULL)
         g_module_close(module);
-    const gchar *files[] = {config, cpu, fan, fan2, script, started, survived};
+    if (range_rc != NULL && g_file_test(range_rc, G_FILE_TEST_IS_DIR))
+        g_rmdir(range_rc);
+    const gchar *files[] = {config, cpu, fan, fan2, script, started, survived, range_rc};
     for (guint i = 0; i < G_N_ELEMENTS(files); i++)
         if (files[i] != NULL)
             g_unlink(files[i]);
@@ -549,6 +734,7 @@ cleanup:
     g_free(tooltip);
     g_free(inline_text);
     g_free(pid_text);
+    g_free(range_rc);
     g_free(config);
     g_free(cpu);
     g_free(fan);
