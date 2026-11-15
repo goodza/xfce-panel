@@ -102,7 +102,7 @@ content="# rust-monitor smart fan control
 $rule
 "
 
-if [ -e "$DROPIN" ] && [ "$(cat "$DROPIN")" = "$(printf '%s' "$content")" ]; then
+if [ -r "$DROPIN" ] && [ "$(cat "$DROPIN")" = "$(printf '%s' "$content")" ]; then
   echo "already installed: $DROPIN (no change)"
   exit 0
 fi
