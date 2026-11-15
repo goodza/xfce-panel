@@ -179,8 +179,9 @@ pub unsafe extern "C" fn monitor_snapshot_free(snapshot: *mut MonitorSnapshot) {
 /// Run one smart fan check using the shared configuration. Never calls GTK.
 /// Returns owned plain-text status, including failures; NULL means a contained panic.
 #[no_mangle]
-pub extern "C" fn monitor_fan_step() -> *mut c_char {
-    std::panic::catch_unwind(|| c_string(fan::step()).into_raw()).unwrap_or(std::ptr::null_mut())
+pub extern "C" fn monitor_fan_step(off_celsius: u32, auto_celsius: u32) -> *mut c_char {
+    std::panic::catch_unwind(|| c_string(fan::step(off_celsius, auto_celsius)).into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// Release status returned by monitor_fan_step. NULL is a no-op.

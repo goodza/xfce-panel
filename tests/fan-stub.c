@@ -6,8 +6,11 @@ static gint overlap;
 
 /* Linked only into the isolated test module, never the installable plugin. */
 char *
-smoke_fan_step(void)
+smoke_fan_step(guint32 off_celsius, guint32 auto_celsius)
 {
+    g_assert_cmpuint(off_celsius, >=, 30);
+    g_assert_cmpuint(off_celsius, <, auto_celsius);
+    g_assert_cmpuint(auto_celsius, <=, 90);
     if (g_atomic_int_add(&running, 1) != 0)
         g_atomic_int_set(&overlap, 1);
     gint call = g_atomic_int_add(&calls, 1) + 1;

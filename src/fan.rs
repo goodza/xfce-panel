@@ -32,10 +32,28 @@ fn speed(text: &str) -> Result<u64, String> {
     Ok(value)
 }
 
-fn requested_level(temp: i64, rpm: u64) -> Option<Level> {
-    if temp > 60_000 {
+#[derive(Clone, Copy)]
+struct TemperatureRange {
+    off: i64,
+    auto: i64,
+}
+
+impl TemperatureRange {
+    fn new(off: u32, auto: u32) -> Result<Self, String> {
+        if !(30..=90).contains(&off) || !(30..=90).contains(&auto) || off >= auto {
+            return Err("Invalid fan temperature range: require 30 <= off < auto <= 90 °C".into());
+        }
+        Ok(Self {
+            off: i64::from(off) * 1000,
+            auto: i64::from(auto) * 1000,
+        })
+    }
+}
+
+fn requested_level(temp: i64, rpm: u64, range: TemperatureRange) -> Option<Level> {
+    if temp > range.auto {
         Some(Level::Auto)
-    } else if temp < 58_000 && rpm < 2000 {
+    } else if temp < range.off && rpm < 2000 {
         Some(Level::Off)
     } else {
         None
@@ -67,9 +85,11 @@ fn step_from(
     config_path: Option<&Path>,
     hwmon: &Path,
     fan_path: &Path,
+    limits: (u32, u32),
     mut write: impl FnMut(Level) -> Result<(), String>,
 ) -> String {
     let result = (|| {
+        let range = TemperatureRange::new(limits.0, limits.1)?;
         let (config, diagnostic) = config::load(config_path);
         if let Some(error) = diagnostic {
             return Err(error);
@@ -88,7 +108,7 @@ fn step_from(
         let rpm = speed(
             &fs::read_to_string(fan_path).map_err(|e| format!("{}: {e}", fan_path.display()))?,
         )?;
-        match requested_level(temp, rpm) {
+        match requested_level(temp, rpm, range) {
             Some(level) => {
                 write(level)?;
                 Ok(match level {
@@ -112,11 +132,12 @@ fn step_from(
     }
 }
 
-pub fn step() -> String {
+pub fn step(off: u32, auto: u32) -> String {
     step_from(
         None,
         Path::new("/sys/class/hwmon"),
         Path::new(FAN_PATH),
+        (off, auto),
         write_level,
     )
 }
@@ -140,7 +161,11 @@ mod tests {
             (57_999, 0, Some(Level::Off)),
             (70_000, 1000, Some(Level::Auto)),
         ] {
-            assert_eq!(requested_level(temp, rpm), expected, "{temp}, {rpm}");
+            assert_eq!(
+                requested_level(temp, rpm, TemperatureRange::new(58, 60).unwrap()),
+                expected,
+                "{temp}, {rpm}"
+            );
         }
         assert_eq!(
             speed("status: enabled\nspeed: 0\nlevel: auto\n").unwrap(),
@@ -153,6 +178,55 @@ mod tests {
     }
 
     #[test]
+    fn custom_ranges_and_invalid_ranges() {
+        let range = TemperatureRange::new(40, 70).unwrap();
+        for (temp, rpm, expected) in [
+            (39_999, 1999, Some(Level::Off)),
+            (39_999, 2000, None),
+            (40_000, 0, None),
+            (60_001, 0, None),
+            (70_000, 0, None),
+            (70_001, 5000, Some(Level::Auto)),
+        ] {
+            assert_eq!(requested_level(temp, rpm, range), expected);
+        }
+        assert!(TemperatureRange::new(30, 90).is_ok());
+        for limits in [(29, 60), (58, 91), (60, 60), (70, 60), (0, u32::MAX)] {
+            assert!(TemperatureRange::new(limits.0, limits.1).is_err());
+            let mut writes = Vec::new();
+            let status = step_from(
+                None,
+                Path::new("/absent"),
+                Path::new("/absent"),
+                limits,
+                |level| {
+                    writes.push(level);
+                    Ok(())
+                },
+            );
+            assert_eq!(writes, [Level::Auto]);
+            assert!(status.contains("Invalid fan temperature range"));
+            assert!(status.contains("Fallback level auto applied"));
+        }
+        let f = Fixture::new();
+        let cpu = f.write("cpu", "65000");
+        let config = f.write("config", &format!("cpu_sensor={cpu:?}"));
+        let fan = f.write("fan", "speed: 1000");
+        for (limits, expected) in [
+            ((58, 60), Some(Level::Auto)),
+            ((40, 70), None),
+            ((68, 75), Some(Level::Off)),
+        ] {
+            let mut writes = Vec::new();
+            step_from(Some(&config), &f.0, &fan, limits, |level| {
+                writes.push(level);
+                Ok(())
+            });
+            assert_eq!(writes, expected.into_iter().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
     fn readings_reload_commands_and_fallback_retry() {
         let f = Fixture::new();
         let cpu = f.write("cpu", "57000");
@@ -160,7 +234,7 @@ mod tests {
         let fan = f.write("fan", "speed: 1800\n");
         let mut writes = Vec::new();
         let mut run = |fail: bool| {
-            step_from(Some(&config), &f.0, &fan, |level| {
+            step_from(Some(&config), &f.0, &fan, (58, 60), |level| {
                 writes.push(level);
                 if fail {
                     Err("permission denied".into())
@@ -194,7 +268,7 @@ mod tests {
             f.write("config", &format!("cpu_sensor={cpu:?}\nfan_sensors=[]"));
             f.write(path, contents);
             let mut fallback = Vec::new();
-            let status = step_from(Some(&config), &f.0, &fan, |level| {
+            let status = step_from(Some(&config), &f.0, &fan, (58, 60), |level| {
                 fallback.push(level);
                 Ok(())
             });
@@ -212,14 +286,14 @@ mod tests {
         let config = f.write("config", "disks=[]");
         let fan = f.write("fan", "speed: 1000");
         for fan in [&fan, &f.0.join("missing")] {
-            let status = step_from(Some(&config), &f.0.join("hwmon"), fan, |level| {
+            let status = step_from(Some(&config), &f.0.join("hwmon"), fan, (58, 60), |level| {
                 assert_eq!(level, Level::Auto);
                 Ok(())
             });
             assert!(status.contains("Fallback"));
         }
         f.write("hwmon/hwmon0/temp2_input", "61000");
-        let status = step_from(Some(&config), &f.0.join("hwmon"), &fan, |level| {
+        let status = step_from(Some(&config), &f.0.join("hwmon"), &fan, (58, 60), |level| {
             assert_eq!(level, Level::Auto);
             Ok(())
         });
@@ -228,6 +302,7 @@ mod tests {
             Some(&config),
             &f.0.join("hwmon"),
             &f.0.join("missing"),
+            (58, 60),
             |level| {
                 assert_eq!(level, Level::Auto);
                 Ok(())

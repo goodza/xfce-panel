@@ -30,8 +30,11 @@ void monitor_snapshot_free(MonitorSnapshot *snapshot);
 
 /* One blocking smart-fan check; call off the GTK thread. Reloads shared CPU
  * configuration, reads ThinkPad RPM and may write through noninteractive sudo.
- * Returns owned status text, or NULL on a contained panic. */
-char *monitor_fan_step(void);
+ * Integer thresholds require 30 <= off_celsius < auto_celsius <= 90.
+ * Invalid ranges attempt automatic control and return an error status.
+ * Returns owned status text, or NULL on a contained panic.
+ * Rebuild Rust and the adapter together when this signature changes. */
+char *monitor_fan_step(uint32_t off_celsius, uint32_t auto_celsius);
 
 /* Release status returned by monitor_fan_step, exactly once. NULL is allowed. */
 void monitor_fan_status_free(char *status);

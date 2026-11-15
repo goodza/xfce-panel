@@ -278,7 +278,7 @@ fan_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cance
     MonitorState *state = job->state;
     (void) source;
     (void) cancel;
-    gchar *status = monitor_fan_step();
+    gchar *status = monitor_fan_step(58, 60);
     g_mutex_lock(&state->worker_mutex);
     state->fan_worker_running = FALSE;
     g_cond_broadcast(&state->worker_done);
