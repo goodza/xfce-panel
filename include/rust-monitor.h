@@ -28,16 +28,21 @@ MonitorSnapshot *monitor_collect(const char *config_path);
  * snapshot remain valid after this call. */
 void monitor_snapshot_free(MonitorSnapshot *snapshot);
 
+typedef struct MonitorFanResult {
+    char *status;    /* owned plain-text status; never NULL */
+    uint32_t failed; /* 1 if the check failed (error status), else 0 */
+} MonitorFanResult;
+
 /* One blocking smart-fan check; call off the GTK thread. Reloads shared CPU
  * configuration, reads ThinkPad RPM and may write through noninteractive sudo.
  * Integer thresholds require 30 <= off_celsius < auto_celsius <= 90.
- * Invalid ranges attempt automatic control and return an error status.
- * Returns owned status text, or NULL on a contained panic.
+ * Invalid ranges attempt automatic control and set failed=1.
+ * Returns an owned result, or NULL on a contained panic.
  * Rebuild Rust and the adapter together when this signature changes. */
-char *monitor_fan_step(uint32_t off_celsius, uint32_t auto_celsius);
+MonitorFanResult *monitor_fan_step(uint32_t off_celsius, uint32_t auto_celsius);
 
-/* Release status returned by monitor_fan_step, exactly once. NULL is allowed. */
-void monitor_fan_status_free(char *status);
+/* Release a result from monitor_fan_step and its status, exactly once. NULL allowed. */
+void monitor_fan_result_free(MonitorFanResult *result);
 
 #ifdef __cplusplus
 }

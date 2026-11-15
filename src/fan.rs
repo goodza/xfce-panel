@@ -81,13 +81,18 @@ fn write_level(level: Level) -> Result<(), String> {
     )
 }
 
+pub(crate) struct FanStatus {
+    pub status: String,
+    pub failed: bool,
+}
+
 fn step_from(
     config_path: Option<&Path>,
     hwmon: &Path,
     fan_path: &Path,
     limits: (u32, u32),
     mut write: impl FnMut(Level) -> Result<(), String>,
-) -> String {
+) -> FanStatus {
     let result = (|| {
         let range = TemperatureRange::new(limits.0, limits.1)?;
         let (config, diagnostic) = config::load(config_path);
@@ -120,19 +125,20 @@ fn step_from(
         }
     })();
     match result {
-        Ok(status) => status,
-        Err(error) => match write(Level::Auto) {
-            Ok(()) => {
-                format!("Smart fan control on: {error}\nFallback level auto applied; retrying")
-            }
-            Err(fallback) => format!(
-                "Smart fan control on: {error}\nFallback level auto failed: {fallback}\nRetrying"
-            ),
+        Ok(status) => FanStatus { status, failed: false },
+        Err(error) => FanStatus {
+            status: match write(Level::Auto) {
+                Ok(()) => format!("Smart fan control on: {error}\nFallback level auto applied; retrying"),
+                Err(fallback) => format!(
+                    "Smart fan control on: {error}\nFallback level auto failed: {fallback}\nRetrying"
+                ),
+            },
+            failed: true,
         },
     }
 }
 
-pub fn step(off: u32, auto: u32) -> String {
+pub fn step(off: u32, auto: u32) -> FanStatus {
     step_from(
         None,
         Path::new("/sys/class/hwmon"),
@@ -205,8 +211,9 @@ mod tests {
                 },
             );
             assert_eq!(writes, [Level::Auto]);
-            assert!(status.contains("Invalid fan temperature range"));
-            assert!(status.contains("Fallback level auto applied"));
+            assert!(status.failed);
+            assert!(status.status.contains("Invalid fan temperature range"));
+            assert!(status.status.contains("Fallback level auto applied"));
         }
         let f = Fixture::new();
         let cpu = f.write("cpu", "65000");
@@ -218,10 +225,11 @@ mod tests {
             ((68, 75), Some(Level::Off)),
         ] {
             let mut writes = Vec::new();
-            step_from(Some(&config), &f.0, &fan, limits, |level| {
+            let status = step_from(Some(&config), &f.0, &fan, limits, |level| {
                 writes.push(level);
                 Ok(())
             });
+            assert!(!status.failed);
             assert_eq!(writes, expected.into_iter().collect::<Vec<_>>());
         }
     }
@@ -243,16 +251,21 @@ mod tests {
                 }
             })
         };
-        assert!(run(false).contains("level 0"));
+        let off = run(false);
+        assert!(!off.failed && off.status.contains("level 0"));
         f.write("cpu", "60001");
-        assert!(run(false).contains("level auto"));
+        let automatic = run(false);
+        assert!(!automatic.failed && automatic.status.contains("level auto"));
         f.write("cpu", "60000");
-        assert!(run(false).contains("unchanged"));
+        let unchanged = run(false);
+        assert!(!unchanged.failed && unchanged.status.contains("unchanged"));
         f.write("cpu", "57000");
         let error = run(true);
-        assert!(error.contains("permission denied"));
-        assert!(error.contains("Fallback level auto failed"));
-        assert!(run(false).contains("level 0"));
+        assert!(error.failed);
+        assert!(error.status.contains("permission denied"));
+        assert!(error.status.contains("Fallback level auto failed"));
+        let recovered = run(false);
+        assert!(!recovered.failed && recovered.status.contains("level 0"));
         assert_eq!(
             writes,
             [Level::Off, Level::Auto, Level::Off, Level::Auto, Level::Off]
@@ -273,7 +286,8 @@ mod tests {
                 Ok(())
             });
             assert_eq!(fallback, [Level::Auto]);
-            assert!(status.contains("Fallback level auto applied"));
+            assert!(status.failed);
+            assert!(status.status.contains("Fallback level auto applied"));
         }
     }
 
@@ -290,14 +304,15 @@ mod tests {
                 assert_eq!(level, Level::Auto);
                 Ok(())
             });
-            assert!(status.contains("Fallback"));
+            assert!(status.failed && status.status.contains("Fallback"));
         }
         f.write("hwmon/hwmon0/temp2_input", "61000");
         let status = step_from(Some(&config), &f.0.join("hwmon"), &fan, (58, 60), |level| {
             assert_eq!(level, Level::Auto);
             Ok(())
         });
-        assert_eq!(status, "Smart fan control on: level auto");
+        assert!(!status.failed);
+        assert_eq!(status.status, "Smart fan control on: level auto");
         let status = step_from(
             Some(&config),
             &f.0.join("hwmon"),
@@ -308,7 +323,7 @@ mod tests {
                 Ok(())
             },
         );
-        assert!(status.contains("Fallback level auto applied"));
+        assert!(status.failed && status.status.contains("Fallback level auto applied"));
     }
 
     #[test]

@@ -1,13 +1,16 @@
 #include <glib.h>
+#include "rust-monitor.h"
 
 static gint calls;
 static gint running;
 static gint overlap;
 static gint last_off;
 static gint last_auto;
+static gint force_fail;
 
-/* Linked only into the isolated test module, never the installable plugin. */
-char *
+/* Linked only into the isolated test module, never the installable plugin.
+ * monitor_fan_step / monitor_fan_result_free are macro-renamed to these. */
+MonitorFanResult *
 smoke_fan_step(guint32 off_celsius, guint32 auto_celsius)
 {
     g_assert_cmpuint(off_celsius, >=, 30);
@@ -20,15 +23,30 @@ smoke_fan_step(guint32 off_celsius, guint32 auto_celsius)
     gint call = g_atomic_int_add(&calls, 1) + 1;
     g_usleep(200000);
     g_atomic_int_add(&running, -1);
-    return g_strdup(call == 1 ?
-        "Smart fan control on: simulated permission failure; retrying" :
-        "Smart fan control on: level auto (simulated)");
+    MonitorFanResult *res = g_new0(MonitorFanResult, 1);
+    if (call == 1 || g_atomic_int_get(&force_fail) != 0) {
+        res->status = g_strdup("Smart fan control on: simulated permission failure; retrying");
+        res->failed = 1;
+    } else {
+        res->status = g_strdup("Smart fan control on: level auto (simulated)");
+        res->failed = 0;
+    }
+    return res;
 }
 
 void
-smoke_fan_status_free(char *status)
+smoke_fan_set_fail(gint value)
 {
-    g_free(status);
+    g_atomic_int_set(&force_fail, value);
+}
+
+void
+smoke_fan_result_free(MonitorFanResult *res)
+{
+    if (res != NULL) {
+        g_free(res->status);
+        g_free(res);
+    }
 }
 
 gint smoke_fan_calls(void) { return g_atomic_int_get(&calls); }

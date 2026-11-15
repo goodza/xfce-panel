@@ -176,23 +176,39 @@ pub unsafe extern "C" fn monitor_snapshot_free(snapshot: *mut MonitorSnapshot) {
     });
 }
 
+#[repr(C)]
+pub struct MonitorFanResult {
+    pub status: *mut c_char,
+    pub failed: u32,
+}
+
+fn fan_result(result: fan::FanStatus) -> *mut MonitorFanResult {
+    Box::into_raw(Box::new(MonitorFanResult {
+        status: c_string(result.status).into_raw(),
+        failed: u32::from(result.failed),
+    }))
+}
+
 /// Run one smart fan check using the shared configuration. Never calls GTK.
-/// Returns owned plain-text status, including failures; NULL means a contained panic.
+/// Returns owned status with an error flag; NULL means a contained panic.
 #[no_mangle]
-pub extern "C" fn monitor_fan_step(off_celsius: u32, auto_celsius: u32) -> *mut c_char {
-    std::panic::catch_unwind(|| c_string(fan::step(off_celsius, auto_celsius)).into_raw())
+pub extern "C" fn monitor_fan_step(off_celsius: u32, auto_celsius: u32) -> *mut MonitorFanResult {
+    std::panic::catch_unwind(|| fan_result(fan::step(off_celsius, auto_celsius)))
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// Release status returned by monitor_fan_step. NULL is a no-op.
+/// Release the result and its status string. NULL is a no-op.
 ///
 /// # Safety
-/// status must be NULL or an unmodified, unfreed pointer returned by monitor_fan_step.
+/// result must be NULL or an unmodified, unfreed pointer returned by monitor_fan_step.
 #[no_mangle]
-pub unsafe extern "C" fn monitor_fan_status_free(status: *mut c_char) {
-    if !status.is_null() {
-        // SAFETY: caller returns the original allocation exactly once.
-        unsafe { drop(CString::from_raw(status)) };
+pub unsafe extern "C" fn monitor_fan_result_free(result: *mut MonitorFanResult) {
+    if !result.is_null() {
+        // SAFETY: caller returns the original allocations exactly once.
+        unsafe {
+            let result = Box::from_raw(result);
+            drop(CString::from_raw(result.status));
+        }
     }
 }
 

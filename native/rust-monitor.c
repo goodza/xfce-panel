@@ -20,8 +20,10 @@ typedef struct {
     GtkWidget *settings_popup;
     GtkWidget *off_scale;
     GtkWidget *auto_scale;
-    GtkWidget *settings_status;
-    gchar *settings_message;
+    GtkWidget *error_label;
+    GtkWidget *error_box;
+    gchar *settings_error;
+    gchar *fan_error;
     gboolean updating_scales;
     GtkWidget *settings_toplevel;
     gulong toplevel_destroy_id;
@@ -55,7 +57,8 @@ state_unref(gpointer data)
     if (g_atomic_int_dec_and_test(&state->refs)) {
         g_free(state->text);
         g_free(state->ram_text);
-        g_free(state->settings_message);
+        g_free(state->settings_error);
+        g_free(state->fan_error);
         g_cond_clear(&state->worker_done);
         g_mutex_clear(&state->worker_mutex);
         g_free(state);
@@ -256,12 +259,42 @@ start_refresh(MonitorState *state)
 }
 
 static void
-settings_message(MonitorState *state, const gchar *message)
+update_error_display(MonitorState *state)
 {
-    g_free(state->settings_message);
-    state->settings_message = g_strdup(message);
-    if (state->settings_status != NULL)
-        gtk_label_set_text(GTK_LABEL(state->settings_status), message);
+    if (state->error_label == NULL)
+        return;
+    gboolean any = state->settings_error != NULL || state->fan_error != NULL;
+    gchar *text = NULL;
+    if (any) {
+        GString *composed = g_string_new(NULL);
+        if (state->settings_error != NULL)
+            g_string_append_printf(composed, "Settings\n%s", state->settings_error);
+        if (state->fan_error != NULL) {
+            if (composed->len != 0)
+                g_string_append(composed, "\n\n");
+            g_string_append_printf(composed, "Fan control\n%s", state->fan_error);
+        }
+        text = g_string_free(composed, FALSE);
+    }
+    gtk_label_set_text(GTK_LABEL(state->error_label), text != NULL ? text : "");
+    g_free(text);
+    gtk_widget_set_visible(state->error_box, any);
+}
+
+static void
+set_settings_error(MonitorState *state, const gchar *message)
+{
+    g_free(state->settings_error);
+    state->settings_error = g_strdup(message);
+    update_error_display(state);
+}
+
+static void
+set_fan_error(MonitorState *state, const gchar *message)
+{
+    g_free(state->fan_error);
+    state->fan_error = g_strdup(message);
+    update_error_display(state);
 }
 
 static gboolean
@@ -278,7 +311,6 @@ load_range(MonitorState *state)
     GError *error = NULL;
     state->off_celsius = 58;
     state->auto_celsius = 60;
-    settings_message(state, "Changes apply on the next fan check.");
     if (path != NULL) {
         if (g_key_file_load_from_file(settings, path, G_KEY_FILE_NONE, &error) &&
             g_key_file_has_group(settings, "SmartFan")) {
@@ -296,7 +328,7 @@ load_range(MonitorState *state)
         if (error != NULL) {
             gchar *message = g_strdup_printf("Saved range unavailable: %s\nUsing defaults: 58–60 °C.",
                                               error->message);
-            settings_message(state, message);
+            set_settings_error(state, message);
             g_free(message);
         }
     }
@@ -333,12 +365,12 @@ save_range(MonitorState *state)
         }
     }
     if (error != NULL) {
-        gchar *message = g_strdup_printf("Not saved: %s\nUsing this range for this session.",
+        gchar *message = g_strdup_printf("Could not save range: %s\nUsing this range for this session.",
                                           error->message);
-        settings_message(state, message);
+        set_settings_error(state, message);
         g_free(message);
     } else {
-        settings_message(state, "Range saved for this panel instance.");
+        set_settings_error(state, NULL);
     }
     g_clear_error(&error);
     g_free(contents);
@@ -370,7 +402,8 @@ settings_popup_destroyed(GtkWidget *widget, MonitorState *state)
     state->settings_popup = NULL;
     state->off_scale = NULL;
     state->auto_scale = NULL;
-    state->settings_status = NULL;
+    state->error_label = NULL;
+    state->error_box = NULL;
 }
 
 static void
@@ -426,15 +459,21 @@ construct_settings(MonitorState *state, GtkWidget *anchor)
                           state_ref(state), button_state_unref, 0);
     g_signal_connect_data(state->auto_scale, "value-changed", G_CALLBACK(range_changed),
                           state_ref(state), button_state_unref, 0);
-    GtkWidget *hint = gtk_label_new("30–90 °C, in 1 °C steps.\nFan off also requires RPM < 2000.\nBetween thresholds, leave the level unchanged.");
-    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
-    state->settings_status = gtk_label_new(state->settings_message);
-    gtk_widget_set_name(state->settings_status, "fan-settings-status");
-    gtk_label_set_line_wrap(GTK_LABEL(state->settings_status), TRUE);
-    gtk_label_set_max_width_chars(GTK_LABEL(state->settings_status), 45);
-    gtk_box_pack_start(GTK_BOX(box), state->settings_status, FALSE, FALSE, 0);
+    state->error_box = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(state->error_box),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(state->error_box, -1, 84);
+    state->error_label = gtk_label_new("");
+    gtk_widget_set_name(state->error_label, "fan-settings-errors");
+    gtk_label_set_line_wrap(GTK_LABEL(state->error_label), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(state->error_label), 44);
+    gtk_label_set_xalign(GTK_LABEL(state->error_label), 0.0);
+    gtk_label_set_yalign(GTK_LABEL(state->error_label), 0.0);
+    gtk_container_add(GTK_CONTAINER(state->error_box), state->error_label);
+    gtk_box_pack_start(GTK_BOX(box), state->error_box, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(state->settings_popup), box);
     gtk_widget_show_all(box);
+    update_error_display(state);
 }
 
 static gboolean
@@ -477,9 +516,9 @@ fan_job_free(gpointer data)
 }
 
 static void
-fan_status_free(gpointer data)
+fan_result_free(gpointer data)
 {
-    monitor_fan_status_free(data);
+    monitor_fan_result_free(data);
 }
 
 static void
@@ -489,12 +528,12 @@ fan_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cance
     MonitorState *state = job->state;
     (void) source;
     (void) cancel;
-    gchar *status = monitor_fan_step(job->off_celsius, job->auto_celsius);
+    MonitorFanResult *res = monitor_fan_step(job->off_celsius, job->auto_celsius);
     g_mutex_lock(&state->worker_mutex);
     state->fan_worker_running = FALSE;
     g_cond_broadcast(&state->worker_done);
     g_mutex_unlock(&state->worker_mutex);
-    g_task_return_pointer(task, status, fan_status_free);
+    g_task_return_pointer(task, res, fan_result_free);
 }
 
 static gboolean
@@ -512,21 +551,25 @@ fan_done(GObject *source, GAsyncResult *result, gpointer data)
     GTask *task = G_TASK(result);
     FanJob *job = g_task_get_task_data(task);
     MonitorState *state = job->state;
-    gchar *status = g_task_propagate_pointer(task, NULL);
+    MonitorFanResult *res = g_task_propagate_pointer(task, NULL);
     (void) source;
     (void) data;
     state->fan_in_flight = FALSE;
     if (!state->removed && state->fan_enabled) {
         if (job->generation == state->fan_generation) {
+            const gchar *status = res != NULL ? res->status : NULL;
+            gboolean failed = res == NULL || res->failed != 0;
             gtk_widget_set_tooltip_text(state->fan_button, status != NULL ? status :
                                         "Smart fan control on: check failed; retrying");
+            set_fan_error(state, failed ?
+                (status != NULL ? status : "check failed; retrying") : NULL);
             state->fan_timeout_id = g_timeout_add_seconds_full(
                 G_PRIORITY_DEFAULT, 2, fan_timeout, state_ref(state), state_unref);
         } else {
             start_fan_refresh(state);
         }
     }
-    monitor_fan_status_free(status);
+    monitor_fan_result_free(res);
 }
 
 static void
@@ -563,6 +606,8 @@ fan_toggled(GtkToggleButton *button, MonitorState *state)
     gtk_widget_set_tooltip_text(GTK_WIDGET(button), state->fan_enabled ?
         "Smart fan control on: checking…" :
         "Smart fan control off; last fan level left unchanged");
+    if (!state->fan_enabled)
+        set_fan_error(state, NULL);
     start_fan_refresh(state);
 }
 

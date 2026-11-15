@@ -113,7 +113,7 @@ probe_range(Construct construct, gint id, gint off, gint automatic, const gchar 
     gtk_widget_show_all(window);
     GtkWidget *low = find_named(window, "fan-off-temperature");
     GtkWidget *high = find_named(window, "fan-auto-temperature");
-    GtkWidget *status = find_named(window, "fan-settings-status");
+    GtkWidget *status = find_named(window, "fan-settings-errors");
     GtkWidget *toggle = find_toggle(GTK_WIDGET(plugin));
     gboolean valid = low != NULL && high != NULL && status != NULL && toggle != NULL &&
         gtk_range_get_value(GTK_RANGE(low)) == off &&
@@ -132,6 +132,21 @@ await_tooltip(GtkWidget *widget, const gchar *needle)
         gchar *text = gtk_widget_get_tooltip_text(widget);
         gboolean found = text != NULL && strstr(text, needle) != NULL;
         g_free(text);
+        if (found)
+            return TRUE;
+        pump();
+    } while (g_get_monotonic_time() < deadline);
+    return FALSE;
+}
+
+/* needle NULL waits for the label to become empty. */
+static gboolean
+await_label(GtkWidget *label, const gchar *needle)
+{
+    gint64 deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+    do {
+        const gchar *text = gtk_label_get_text(GTK_LABEL(label));
+        gboolean found = needle == NULL ? text[0] == '\0' : strstr(text, needle) != NULL;
         if (found)
             return TRUE;
         pump();
@@ -399,7 +414,7 @@ main(int argc, char **argv)
     GtkWidget *popover = find_named(window, "fan-temperature-settings");
     GtkWidget *off_scale = find_named(window, "fan-off-temperature");
     GtkWidget *auto_scale = find_named(window, "fan-auto-temperature");
-    GtkWidget *range_status = find_named(window, "fan-settings-status");
+    GtkWidget *range_status = find_named(window, "fan-settings-errors");
     CHECK(popover != NULL && off_scale != NULL && auto_scale != NULL && range_status != NULL,
           "temperature popup and both named sliders constructed");
     gtk_widget_set_opacity(popover, 0);
@@ -462,8 +477,8 @@ main(int argc, char **argv)
     gtk_range_set_value(GTK_RANGE(off_scale), 45);
     range_rc = xfce_panel_plugin_save_location(plugin, FALSE);
     CHECK(range_rc != NULL && g_str_has_prefix(range_rc, root) &&
-          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Range saved"),
-          "range saved in isolated per-instance XFCE rc file");
+          g_str_equal(gtk_label_get_text(GTK_LABEL(range_status)), ""),
+          "successful save keeps the popup error area empty");
     CHECK(put(range_rc, "# Keep this comment\n[Other]\nkeep=value\n[SmartFan]\noff-celsius=45\nauto-celsius=70\n"),
           "existing unrelated rc settings and comment seeded");
     gtk_range_set_value(GTK_RANGE(off_scale), 46);
@@ -477,12 +492,12 @@ main(int argc, char **argv)
           "unwritable settings target simulated with a directory");
     gtk_range_set_value(GTK_RANGE(off_scale), 47);
     CHECK(gtk_range_get_value(GTK_RANGE(off_scale)) == 47 &&
-          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Not saved") &&
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Could not save") &&
           strstr(gtk_label_get_text(GTK_LABEL(range_status)), "this session"),
           "failed save keeps session range and displays a warning");
     CHECK(g_rmdir(range_rc) == 0, "save failure fixture removed");
     gtk_range_set_value(GTK_RANGE(off_scale), 48);
-    CHECK(strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Range saved"),
+    CHECK(g_str_equal(gtk_label_get_text(GTK_LABEL(range_status)), ""),
           "next adjustment retries saving and clears the error");
     gtk_widget_hide(popover);
     CHECK(!gtk_widget_get_visible(popover) &&
@@ -498,7 +513,7 @@ main(int argc, char **argv)
     gtk_range_set_value(GTK_RANGE(off_scale), 47);
     CHECK(g_file_get_contents(range_rc, &contents, NULL, NULL) &&
           g_str_equal(contents, "malformed settings [") &&
-          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Not saved"),
+          strstr(gtk_label_get_text(GTK_LABEL(range_status)), "Could not save"),
           "malformed rc is not silently overwritten; new range remains session-only");
     g_clear_pointer(&contents, g_free);
     CHECK(put(range_rc, "[SmartFan]\noff-celsius=30\nauto-celsius=31\n") &&
@@ -514,11 +529,13 @@ main(int argc, char **argv)
     if (argc == 3) {
         gint (*calls)(void) = NULL, (*running)(void) = NULL, (*overlap)(void) = NULL;
         gint (*fan_off)(void) = NULL, (*fan_auto)(void) = NULL;
+        void (*set_fail)(gint) = NULL;
         CHECK(g_module_symbol(module, "smoke_fan_calls", (gpointer *) &calls) &&
               g_module_symbol(module, "smoke_fan_running", (gpointer *) &running) &&
               g_module_symbol(module, "smoke_fan_overlap", (gpointer *) &overlap) &&
               g_module_symbol(module, "smoke_fan_off", (gpointer *) &fan_off) &&
-              g_module_symbol(module, "smoke_fan_auto", (gpointer *) &fan_auto),
+              g_module_symbol(module, "smoke_fan_auto", (gpointer *) &fan_auto) &&
+              g_module_symbol(module, "smoke_fan_set_fail", (gpointer *) &set_fail),
               "test-only fan backend resolved (no hardware or sudo)");
         CHECK(calls() == 0, "disabled startup never invokes fan controller");
         g_clear_pointer(&contents, g_free);
@@ -543,6 +560,8 @@ main(int argc, char **argv)
         CHECK(fan_off() == 47 && fan_auto() == 70 &&
               await_tooltip(fan_button, "simulated permission failure"),
               "in-flight check keeps old range and reports failure during slow metrics");
+        CHECK(await_label(range_status, "simulated permission failure"),
+              "fan failure appears in the popup error area");
         CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label) &&
               gtk_widget_get_visible(fan_button) &&
               gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
@@ -550,6 +569,8 @@ main(int argc, char **argv)
         CHECK(await_tooltip(fan_button, "level auto (simulated)") && calls() >= 2 &&
               fan_off() == 50 && fan_auto() == 75,
               "next fan check receives new range and retries despite one-hour metric delay");
+        CHECK(await_label(range_status, NULL),
+              "fan error clears from the popup after recovery");
         CHECK(await_counter(calls, 3) && running() == 1,
               "next fan check starts for off-during-flight test");
         gtk_button_clicked(GTK_BUTTON(fan_button));
@@ -568,6 +589,14 @@ main(int argc, char **argv)
         CHECK(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)) &&
               await_counter(calls, stopped_calls + 2) && overlap() == 0,
               "rapid off/on toggles serialize checks and start a fresh generation");
+        set_fail(1);
+        CHECK(await_label(range_status, "simulated permission failure"),
+              "forced fan failure repopulates the popup error area");
+        gtk_button_clicked(GTK_BUTTON(fan_button));
+        CHECK(await_label(range_status, NULL),
+              "disabling smart control clears its popup error");
+        set_fail(0);
+        gtk_button_clicked(GTK_BUTTON(fan_button));
         CHECK(await_counter(running, 1), "fan worker active before widget destruction");
         g_signal_connect(popover, "destroy", G_CALLBACK(observe_destroy), &popup_destroyed);
         CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
