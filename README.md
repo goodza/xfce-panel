@@ -130,13 +130,21 @@ printf 'level auto\n' | sudo /usr/bin/tee /proc/acpi/ibm/fan
 
 This feature requires a supported ThinkPad with a readable/writable `/proc/acpi/ibm/fan` and manual fan control enabled in the kernel driver. No modules or kernel settings are changed by the plugin. Confirm support for your model before using fan-off mode.
 
-The plugin executes `/usr/bin/sudo -n /usr/bin/tee /proc/acpi/ibm/fan` with fixed stdin (`level auto\n` or `level 0\n`), not a shell. `-n` prevents password prompts. An administrator must configure permission separately. For example, use `sudo visudo -f /etc/sudoers.d/rust-monitor-fan` and replace `youruser` in this narrowly scoped rule:
+The plugin executes `/usr/bin/sudo -n /usr/bin/tee /proc/acpi/ibm/fan` with fixed stdin (`level auto\n` or `level 0\n`), not a shell. `-n` forbids password prompts, so a scoped **NOPASSWD** rule is required — without it the fan toggle shows `sudo: a password is required` / *interactive authentication required* and never writes a level. Grant it once with the setup script (validates the rule with `visudo -c` before installing, and re-validates the merged sudoers afterward, rolling back on failure):
+
+```sh
+scripts/install-fan-sudoers.sh            # install for the invoking user (one password prompt)
+scripts/install-fan-sudoers.sh --dry-run  # show the rule without changing anything
+scripts/install-fan-sudoers.sh --remove   # uninstall
+```
+
+It writes `/etc/sudoers.d/rust-monitor-fan` (mode 0440, root:root) containing exactly:
 
 ```sudoers
 youruser ALL=(root) NOPASSWD: /usr/bin/tee /proc/acpi/ibm/fan
 ```
 
-This grants that user control over the fan interface; do not grant unrestricted `tee`, shell, or full sudo access for this feature. Fixed executable paths must exist. Without permission or driver support, the icon tooltip reports errors rather than prompting. Tests do not verify real sudo authorization or hardware writes. The CLI and ordinary metric collection never change fan levels.
+Prefer to do it by hand instead? `sudo visudo -f /etc/sudoers.d/rust-monitor-fan` and add that line for your user. Either way the rule is pinned to one command and one file argument — it grants that user control over the fan interface and nothing else (no shell, no other paths, no unrestricted `tee`). Fixed executable paths must exist. Without permission or driver support, the icon tooltip and the slider popup report the error rather than prompting. Tests do not verify real sudo authorization or hardware writes. The CLI and ordinary metric collection never change fan levels.
 
 ## Add a metric script
 
