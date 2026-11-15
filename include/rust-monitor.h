@@ -28,6 +28,14 @@ MonitorSnapshot *monitor_collect(const char *config_path);
  * snapshot remain valid after this call. */
 void monitor_snapshot_free(MonitorSnapshot *snapshot);
 
+/* One blocking smart-fan check; call off the GTK thread. Reloads shared CPU
+ * configuration, reads ThinkPad RPM and may write through noninteractive sudo.
+ * Returns owned status text, or NULL on a contained panic. */
+char *monitor_fan_step(void);
+
+/* Release status returned by monitor_fan_step, exactly once. NULL is allowed. */
+void monitor_fan_status_free(char *status);
+
 #ifdef __cplusplus
 }
 #endif

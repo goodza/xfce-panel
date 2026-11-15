@@ -1,5 +1,6 @@
 mod config;
 mod extension;
+mod fan;
 mod sensors;
 
 use std::{
@@ -30,15 +31,8 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
     let mut details: Vec<String> = diagnostic.into_iter().collect();
     let (temps, discovered_fans) = sensors::discover(hwmon);
     let temps = config.cpu_sensor.map(|p| vec![p]).unwrap_or(temps);
-    let mut hottest = None;
-    for path in temps {
-        match sensors::reading(&path) {
-            Ok(value) => {
-                hottest = Some(hottest.map_or(value, |old: i64| old.max(value)));
-            }
-            Err(e) => details.push(e),
-        }
-    }
+    let (hottest, cpu_errors) = sensors::cpu_temperature(temps);
+    details.extend(cpu_errors);
     if let Some(temp) = hottest {
         let value = format!("{:.1} °C", temp as f64 / 1000.0);
         details.push(format!("CPU {value}"));
@@ -180,6 +174,25 @@ pub unsafe extern "C" fn monitor_snapshot_free(snapshot: *mut MonitorSnapshot) {
             }
         }
     });
+}
+
+/// Run one smart fan check using the shared configuration. Never calls GTK.
+/// Returns owned plain-text status, including failures; NULL means a contained panic.
+#[no_mangle]
+pub extern "C" fn monitor_fan_step() -> *mut c_char {
+    std::panic::catch_unwind(|| c_string(fan::step()).into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+/// Release status returned by monitor_fan_step. NULL is a no-op.
+///
+/// # Safety
+/// status must be NULL or an unmodified, unfreed pointer returned by monitor_fan_step.
+#[no_mangle]
+pub unsafe extern "C" fn monitor_fan_status_free(status: *mut c_char) {
+    if !status.is_null() {
+        // SAFETY: caller returns the original allocation exactly once.
+        unsafe { drop(CString::from_raw(status)) };
+    }
 }
 
 #[cfg(test)]
