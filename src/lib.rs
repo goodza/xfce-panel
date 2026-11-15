@@ -1,5 +1,6 @@
 mod config;
 mod extension;
+mod fan;
 mod sensors;
 
 use std::{
@@ -30,15 +31,8 @@ fn collect_from(config_path: Option<&Path>, hwmon: &Path, meminfo: &Path) -> Sna
     let mut details: Vec<String> = diagnostic.into_iter().collect();
     let (temps, discovered_fans) = sensors::discover(hwmon);
     let temps = config.cpu_sensor.map(|p| vec![p]).unwrap_or(temps);
-    let mut hottest = None;
-    for path in temps {
-        match sensors::reading(&path) {
-            Ok(value) => {
-                hottest = Some(hottest.map_or(value, |old: i64| old.max(value)));
-            }
-            Err(e) => details.push(e),
-        }
-    }
+    let (hottest, cpu_errors) = sensors::cpu_temperature(temps);
+    details.extend(cpu_errors);
     if let Some(temp) = hottest {
         let value = format!("{:.1} °C", temp as f64 / 1000.0);
         details.push(format!("CPU {value}"));
@@ -180,6 +174,42 @@ pub unsafe extern "C" fn monitor_snapshot_free(snapshot: *mut MonitorSnapshot) {
             }
         }
     });
+}
+
+#[repr(C)]
+pub struct MonitorFanResult {
+    pub status: *mut c_char,
+    pub failed: u32,
+}
+
+fn fan_result(result: fan::FanStatus) -> *mut MonitorFanResult {
+    Box::into_raw(Box::new(MonitorFanResult {
+        status: c_string(result.status).into_raw(),
+        failed: u32::from(result.failed),
+    }))
+}
+
+/// Run one smart fan check using the shared configuration. Never calls GTK.
+/// Returns owned status with an error flag; NULL means a contained panic.
+#[no_mangle]
+pub extern "C" fn monitor_fan_step(off_celsius: u32, auto_celsius: u32) -> *mut MonitorFanResult {
+    std::panic::catch_unwind(|| fan_result(fan::step(off_celsius, auto_celsius)))
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Release the result and its status string. NULL is a no-op.
+///
+/// # Safety
+/// result must be NULL or an unmodified, unfreed pointer returned by monitor_fan_step.
+#[no_mangle]
+pub unsafe extern "C" fn monitor_fan_result_free(result: *mut MonitorFanResult) {
+    if !result.is_null() {
+        // SAFETY: caller returns the original allocations exactly once.
+        unsafe {
+            let result = Box::from_raw(result);
+            drop(CString::from_raw(result.status));
+        }
+    }
 }
 
 #[cfg(test)]

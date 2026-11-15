@@ -1,6 +1,6 @@
 use crate::config::{plain_text, Extension};
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, RawFd},
         unix::process::CommandExt,
@@ -65,9 +65,20 @@ fn stderr_detail(bytes: &[u8]) -> String {
 }
 
 pub fn run(extension: &Extension) -> Result<(String, Option<String>), String> {
+    run_with_input(extension, None)
+}
+
+pub(crate) fn run_with_input(
+    extension: &Extension,
+    input: Option<&[u8]>,
+) -> Result<(String, Option<String>), String> {
     let mut child = Command::new(&extension.command[0])
         .args(&extension.command[1..])
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -79,6 +90,14 @@ pub fn run(extension: &Extension) -> Result<(String, Option<String>), String> {
     let mut err = Vec::new();
     let mut remaining = LIMIT;
     let result = (|| {
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .ok_or("stdin unavailable")?
+                .write_all(input)
+                .map_err(|e| format!("writing input: {e}"))?;
+        }
         nonblocking(stdout.as_raw_fd()).map_err(|e| e.to_string())?;
         nonblocking(stderr.as_raw_fd()).map_err(|e| e.to_string())?;
         let deadline = Instant::now() + Duration::from_millis(extension.timeout_ms);

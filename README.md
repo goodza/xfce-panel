@@ -6,7 +6,7 @@ Extensible Linux system metrics in the XFCE4 panel: CPU temperature, fan RPM, av
 54.0 °C · 1240 RPM · 8.20 GiB · / 62%
 ```
 
-Metrics appear inline without CPU, first-fan, or RAM labels; hover retains full labels and diagnostics. The second fan is tooltip-only (numbering follows sorted configured/discovered sensor paths). CPU temperature turns red strictly above 80°C and returns to normal at or below 80°C or when unavailable. The threshold uses the raw reading, so a value rounded to 80.0°C can still be red. Other metrics keep their normal color. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. Right-click toggles full display ↔ RAM-only; Ctrl+right-click passes through to XFCE's plugin menu. Each instance starts full and remembers the selection only until it is removed or the panel restarts. Hover details and polling continue in either view. RAM-only mode never inherits the CPU warning color; returning full restores the current warning. Until RAM is available, minimized mode shows Monitor with diagnostics. There is no Applications menu or settings dialog.
+Metrics appear inline without CPU, first-fan, or RAM labels; hover retains full labels and diagnostics. The second fan is tooltip-only (numbering follows sorted configured/discovered sensor paths). CPU temperature turns red strictly above 80°C and returns to normal at or below 80°C or when unavailable. The threshold uses the raw reading, so a value rounded to 80.0°C can still be red. Other metrics keep their normal color. Missing readings and failing extensions are omitted. Vertical/deskbar panels stack metrics. Right-click toggles full display ↔ RAM-only; Ctrl+right-click passes through to XFCE's plugin menu. Each instance starts full and remembers the selection only until it is removed or the panel restarts. Hover details and polling continue in either view. RAM-only mode never inherits the CPU warning color; returning full restores the current warning. Until RAM is available, minimized mode shows Monitor with diagnostics. There is no Applications menu or general settings dialog; left-clicking the readings opens the fan temperature controls. A separate **fan icon toggle** enables optional ThinkPad smart fan control and remains visible in RAM-only mode; see [Smart fan control](#smart-fan-control) before enabling it.
 
 ## Try without installing
 
@@ -30,17 +30,18 @@ sudo apt install build-essential pkg-config libxfce4panel-2.0-dev libxfce4ui-2-d
 make
 ```
 
-Requires XFCE4 panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
+Requires XFCE4 panel **4.19 or newer** (including 4.20), panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
 
-**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. Staged installation also passes. Actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
+**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK test with transparent native windows pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. A second test module uses a simulated fan backend to verify nonblocking toggles, independent polling, failure/retry, rapid off/on transitions, and teardown without sudo or hardware writes. Popup tests cover slider bounds, per-instance reload, invalid settings, save failure/recovery, error-area show/clear on fan failure, recovery and disable, and teardown with default and disabled animations. A separate-process X11 GtkSocket/GtkPlug test verifies the slider popup is a native toplevel that is not clipped to panel height. Escape is tested by injecting GTK's key signal; physical keyboard and outside-click routing still need a live-panel check. Staged installation also passes. Real fan writes, sudo authorization, actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
 
 ```sh
 make test-native
+make test-embedded  # X11-only, separate-process XEmbed regression
 # For a headless environment with Xvfb installed:
 # xvfb-run -a make test-native
 ```
 
-The native test requires a working GTK display even though it uses an offscreen window. It uses temporary configuration, never your real config; missing display is a failure, not a skipped pass.
+The native test requires a working GTK display and uses transparent native windows, because XFCE popup positioning needs real window origins. `test-embedded` additionally requires X11 and runs its socket and plugin in separate processes. Both use temporary configuration, never your real config or fan-control writes; a missing display is a failure, not a skipped pass.
 
 ## Install into XFCE's plugin directories
 
@@ -52,7 +53,7 @@ make PREFIX=/usr LIBDIR="$PANEL_LIBDIR"
 sudo make install PREFIX=/usr LIBDIR="$PANEL_LIBDIR"
 ```
 
-Then open **Panel → Add New Items → Rust Monitor**. If not listed, restart the panel yourself with `xfce4-panel -r` and reopen the item list. Installation does not add an item or restart your panel automatically. Multiple instances share one configuration file.
+Then open **Panel → Add New Items → Rust Monitor**. If not listed, restart the panel yourself with `xfce4-panel -r` and reopen the item list. Installation does not add an item or restart your panel automatically. Multiple instances share the metric/sensor configuration file but save their fan temperature ranges separately.
 
 For staging without touching system files:
 
@@ -98,6 +99,53 @@ timeout_ms = 1000
 - Disk percentage is `used / (used + available)` from `statvfs`, excluding reserved blocks from available capacity. Tooltip space is available to an unprivileged user. No disk I/O throughput is measured.
 - Unknown config keys and invalid extension definitions reject the whole config, with a diagnostic.
 
+## Smart fan control
+
+Click the fan icon to enable or disable control. It starts **off** each time the plugin starts, without saving its state. The pressed icon indicates enabled control; hover over it for the latest action or error. Metric right-click behavior is unchanged.
+
+**Left-click the readings** (also in RAM-only mode) to open two temperature sliders:
+
+- **Fan off below:** lower threshold, initially **58°C**.
+- **Automatic above:** upper threshold, initially **60°C**.
+
+Both sliders use 1°C steps from 30–90°C. They cannot cross: the lower threshold stays at least 1°C below the upper. Changes apply on the next fan check while dragging; an in-flight check may finish with its previous range. Adjusting the range never enables fan control. Click outside or press Escape to close the popup. It uses XFCE's native popup-window API so the sliders can appear outside the external plugin's panel-sized window. Below the sliders the popup shows **only current errors** — an active fan-control failure or a range load/save failure — and is otherwise empty; each clears when its source recovers, and switching smart control off clears its fan error. The red CPU display warning stays fixed at >80°C.
+
+Each panel instance remembers its range in XFCE's per-instance rc file, separately from `rust-monitor.toml`; fan enablement still starts off. Missing saved settings use 58–60°C. Invalid saved settings show a warning and use those defaults. If saving fails, the selected range still works for this session and the popup shows a **Could not save range** error; the next adjustment retries and clears it on success. Existing malformed rc files are not overwritten. Manual rc edits take effect when the instance restarts.
+
+While enabled, a separate background check runs immediately, then two seconds after each check completes, independently of metric scripts and `interval_seconds`:
+
+- CPU **above the upper threshold** → write `level auto`.
+- CPU **below the lower threshold** **and** ThinkPad fan speed **<2000 RPM** → write `level 0`.
+- Otherwise leave the level unchanged. Bounds are strict: exactly a selected threshold or 2000 RPM does not trigger its corresponding transition.
+
+CPU selection follows `cpu_sensor` or normal hottest-CPU discovery. Control RPM comes from `speed:` in `/proc/acpi/ibm/fan`, regardless of `fan_sensors` or the displayed fan metric. Missing/invalid readings, invalid configuration, or command failures attempt automatic control, report the failure/fallback result in the icon tooltip and the slider popup's error area, and keep retrying while enabled. Each command has a one-second timeout.
+
+**Important:** Switching off or removing the plugin **does not restore automatic control**; the last level, possibly `level 0`, is left unchanged. A check already started may finish after switching off. This plugin is not a fail-safe cooling service. Enable only one controller; do not run it alongside competing fan-management tools. To restore automatic control yourself:
+
+```sh
+printf 'level auto\n' | sudo /usr/bin/tee /proc/acpi/ibm/fan
+```
+
+### Required permissions and hardware
+
+This feature requires a supported ThinkPad with a readable/writable `/proc/acpi/ibm/fan` and manual fan control enabled in the kernel driver. No modules or kernel settings are changed by the plugin. Confirm support for your model before using fan-off mode.
+
+The plugin executes `/usr/bin/sudo -n /usr/bin/tee /proc/acpi/ibm/fan` with fixed stdin (`level auto\n` or `level 0\n`), not a shell. `-n` forbids password prompts, so a scoped **NOPASSWD** rule is required — without it the fan toggle shows `sudo: a password is required` / *interactive authentication required* and never writes a level. Grant it once with the setup script (validates the rule with `visudo -c` before installing, and re-validates the merged sudoers afterward, rolling back on failure):
+
+```sh
+scripts/install-fan-sudoers.sh            # install for the invoking user (one password prompt)
+scripts/install-fan-sudoers.sh --dry-run  # show the rule without changing anything
+scripts/install-fan-sudoers.sh --remove   # uninstall
+```
+
+It writes `/etc/sudoers.d/rust-monitor-fan` (mode 0440, root:root) containing exactly:
+
+```sudoers
+youruser ALL=(root) NOPASSWD: /usr/bin/tee /proc/acpi/ibm/fan
+```
+
+Prefer to do it by hand instead? `sudo visudo -f /etc/sudoers.d/rust-monitor-fan` and add that line for your user. Either way the rule is pinned to one command and one file argument — it grants that user control over the fan interface and nothing else (no shell, no other paths, no unrestricted `tee`). Fixed executable paths must exist. Without permission or driver support, the icon tooltip and the slider popup report the error rather than prompting. Tests do not verify real sudo authorization or hardware writes. The CLI and ordinary metric collection never change fan levels.
+
 ## Add a metric script
 
 Make a local script executable and add its absolute path as `command`. See `examples/metric.sh`.
@@ -123,10 +171,12 @@ Collection normally runs off the UI thread with one job in flight. Removing the 
 
 For the remaining live-panel checks:
 
-1. Run `make test-native`, then install into the panel's actual directories.
+1. Run `make test-native` and, on X11, `make test-embedded`, then install into the panel's actual directories.
 2. Add Rust Monitor; check inline readings and plain-text hover details.
 3. Edit the config and verify reload, invalid-config diagnostics, explicit sensors, and additional filesystems.
 4. Add a successful script, failing script, and timed-out script; verify hidden failures and tooltip errors.
 5. Check horizontal, vertical, and deskbar panels, then remove the item while a script runs and confirm no extension remains running.
+6. Left-click readings and adjust both sliders in full and RAM-only views. Check outside-click/Escape dismissal, popup placement in each panel orientation, saved ranges after restart, and independent ranges on two instances. Changing a range must not enable control.
+7. On supported hardware only, configure the narrow sudo permission yourself, enable the fan icon, and inspect its tooltip and actual fan state. Confirm it stays accessible in RAM-only mode. After disabling/removing it, restore `level auto` manually; this checklist does not authorize automated hardware changes.
 
 See `architecture.md` for the lifecycle and extension contracts.

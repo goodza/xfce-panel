@@ -44,6 +44,18 @@ pub fn discover(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (temps, fans)
 }
 
+pub fn cpu_temperature(paths: Vec<PathBuf>) -> (Option<i64>, Vec<String>) {
+    let mut hottest = None;
+    let mut errors = Vec::new();
+    for path in paths {
+        match reading(&path) {
+            Ok(value) => hottest = Some(hottest.map_or(value, |old: i64| old.max(value))),
+            Err(error) => errors.push(error),
+        }
+    }
+    (hottest, errors)
+}
+
 pub fn reading(path: &Path) -> Result<i64, String> {
     fs::read_to_string(path)
         .map_err(|e| format!("{}: {e}", path.display()))?

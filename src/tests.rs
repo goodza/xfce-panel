@@ -7,9 +7,9 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+pub(crate) struct Fixture(pub(crate) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "rust-monitor-{}-{}",
             std::process::id(),
@@ -18,7 +18,7 @@ impl Fixture {
         fs::create_dir_all(&p).unwrap();
         Self(p)
     }
-    fn write(&self, path: &str, text: &str) -> PathBuf {
+    pub(crate) fn write(&self, path: &str, text: &str) -> PathBuf {
         let path = self.0.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
