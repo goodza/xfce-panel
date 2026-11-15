@@ -20,6 +20,7 @@ Checking CPU temperature, fan speed, memory headroom, and disk capacity should n
 ## Capabilities
 
 - Display CPU temperature and fan speed in RPM.
+- Opt into ThinkPad smart fan control using an icon toggle, switching between automatic control and fan-off according to CPU temperature and the controlled fan's RPM.
 - Display available RAM.
 - Display filesystem space usage, rather than disk I/O throughput.
 - Add metrics through executable scripts returning metric values.
