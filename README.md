@@ -104,9 +104,9 @@ Click the fan icon to enable or disable control. It starts **off** each time the
 
 While enabled, a separate background check runs immediately, then two seconds after each check completes, independently of metric scripts and `interval_seconds`:
 
-- CPU **>80°C** → write `level auto`.
+- CPU **>60°C** → write `level auto`.
 - CPU **<58°C** **and** ThinkPad fan speed **<2000 RPM** → write `level 0`.
-- Otherwise leave the level unchanged. Bounds are strict: exactly 80°C, 58°C, or 2000 RPM does not trigger the corresponding transition.
+- Otherwise leave the level unchanged. Bounds are strict: exactly 60°C, 58°C, or 2000 RPM does not trigger the corresponding transition.
 
 CPU selection follows `cpu_sensor` or normal hottest-CPU discovery. Control RPM comes from `speed:` in `/proc/acpi/ibm/fan`, regardless of `fan_sensors` or the displayed fan metric. Missing/invalid readings, invalid configuration, or command failures attempt automatic control, report the failure/fallback result in the icon tooltip, and keep retrying while enabled. Each command has a one-second timeout.
 

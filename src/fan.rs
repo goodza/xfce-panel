@@ -33,7 +33,7 @@ fn speed(text: &str) -> Result<u64, String> {
 }
 
 fn requested_level(temp: i64, rpm: u64) -> Option<Level> {
-    if temp > 80_000 {
+    if temp > 60_000 {
         Some(Level::Auto)
     } else if temp < 58_000 && rpm < 2000 {
         Some(Level::Off)
@@ -129,14 +129,16 @@ mod tests {
     #[test]
     fn strict_temperature_and_rpm_boundaries() {
         for (temp, rpm, expected) in [
-            (80_001, 5000, Some(Level::Auto)),
-            (80_000, 0, None),
+            (60_001, 5000, Some(Level::Auto)),
+            (60_001, 0, Some(Level::Auto)),
+            (60_000, 0, None),
+            (59_999, 0, None),
             (58_000, 0, None),
             (57_999, 1999, Some(Level::Off)),
             (57_999, 2000, None),
             (57_999, 2001, None),
             (57_999, 0, Some(Level::Off)),
-            (70_000, 1000, None),
+            (70_000, 1000, Some(Level::Auto)),
         ] {
             assert_eq!(requested_level(temp, rpm), expected, "{temp}, {rpm}");
         }
@@ -168,9 +170,9 @@ mod tests {
             })
         };
         assert!(run(false).contains("level 0"));
-        f.write("cpu", "80001");
+        f.write("cpu", "60001");
         assert!(run(false).contains("level auto"));
-        f.write("cpu", "70000");
+        f.write("cpu", "60000");
         assert!(run(false).contains("unchanged"));
         f.write("cpu", "57000");
         let error = run(true);
@@ -216,7 +218,7 @@ mod tests {
             });
             assert!(status.contains("Fallback"));
         }
-        f.write("hwmon/hwmon0/temp2_input", "81000");
+        f.write("hwmon/hwmon0/temp2_input", "61000");
         let status = step_from(Some(&config), &f.0.join("hwmon"), &fan, |level| {
             assert_eq!(level, Level::Auto);
             Ok(())
