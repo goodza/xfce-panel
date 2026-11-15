@@ -12,6 +12,7 @@ NATIVE_BUILD_DIR := $(CARGO_TARGET_DIR)/panel
 RUST_LIB := $(CARGO_TARGET_DIR)/release/libxfce_rust_monitor.a
 CLI := $(CARGO_TARGET_DIR)/release/rust-monitor
 PLUGIN := $(NATIVE_BUILD_DIR)/librust-monitor.so
+FAN_TEST_PLUGIN := $(NATIVE_BUILD_DIR)/librust-monitor-fan-test.so
 PACKAGES := libxfce4panel-2.0 gtk+-3.0 gio-2.0
 PLUGIN_LIBDIR := $(LIBDIR)/xfce4/panel/plugins
 PLUGIN_DATADIR := $(DATADIR)/xfce4/panel/plugins
@@ -56,14 +57,23 @@ test-ffi: rust
 		-o "$(NATIVE_BUILD_DIR)/ffi-smoke"
 	"$(NATIVE_BUILD_DIR)/ffi-smoke" config.example.toml
 
+$(FAN_TEST_PLUGIN): native/rust-monitor.c include/rust-monitor.h tests/fan-stub.c rust | check-deps
+	mkdir -p "$(NATIVE_BUILD_DIR)"
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -fPIC -Iinclude \
+		-Dmonitor_fan_step=smoke_fan_step -Dmonitor_fan_status_free=smoke_fan_status_free \
+		$$($(PKG_CONFIG) --cflags $(PACKAGES)) -shared -o "$@" native/rust-monitor.c tests/fan-stub.c \
+		"$(RUST_LIB)" $(LDFLAGS) -Wl,-z,nodelete \
+		$$($(PKG_CONFIG) --libs $(PACKAGES)) -ldl -lpthread -lm $(LDLIBS)
+
 # Requires a working GTK display; unavailable displays are failures, not skips.
-test-native: $(PLUGIN)
+test-native: $(PLUGIN) $(FAN_TEST_PLUGIN)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror \
 		$$($(PKG_CONFIG) --cflags $(PACKAGES) gmodule-2.0) \
 		tests/native-smoke.c $(LDFLAGS) \
 		$$($(PKG_CONFIG) --libs $(PACKAGES) gmodule-2.0) $(LDLIBS) \
 		-o "$(NATIVE_BUILD_DIR)/native-smoke"
 	"$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(PLUGIN))"
+	"$(NATIVE_BUILD_DIR)/native-smoke" "$(abspath $(FAN_TEST_PLUGIN))" --fan-stub
 
 clean:
 	$(CARGO) clean --target-dir "$(CARGO_TARGET_DIR)"

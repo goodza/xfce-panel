@@ -8,6 +8,13 @@ typedef struct {
     gint refs;
     XfcePanelPlugin *plugin; /* borrowed; owned by the task while collecting */
     GtkWidget *label;
+    GtkWidget *content;
+    GtkWidget *fan_button;
+    gboolean fan_enabled;
+    gboolean fan_in_flight;
+    gboolean fan_worker_running;
+    guint fan_timeout_id;
+    guint fan_generation;
     gchar *text;
     gchar *ram_text;
     gboolean minimized;
@@ -21,6 +28,7 @@ typedef struct {
 } MonitorState;
 
 static void start_refresh(MonitorState *state);
+static void start_fan_refresh(MonitorState *state);
 
 static MonitorState *
 state_ref(MonitorState *state)
@@ -55,12 +63,19 @@ stop_refresh(MonitorState *state)
 {
     state->removed = TRUE;
     state->label = NULL;
+    state->content = NULL;
+    state->fan_button = NULL;
+    state->fan_enabled = FALSE;
+    if (state->fan_timeout_id != 0) {
+        g_source_remove(state->fan_timeout_id);
+        state->fan_timeout_id = 0;
+    }
     if (state->timeout_id != 0) {
         g_source_remove(state->timeout_id);
         state->timeout_id = 0;
     }
     g_mutex_lock(&state->worker_mutex);
-    while (state->worker_running)
+    while (state->worker_running || state->fan_worker_running)
         g_cond_wait(&state->worker_done, &state->worker_mutex);
     g_mutex_unlock(&state->worker_mutex);
 }
@@ -90,6 +105,8 @@ repaint(MonitorState *state, gboolean stacked)
     if (state->removed)
         return;
 
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(state->content),
+                                   stacked ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL);
     const gchar *selected = state->minimized ? state->ram_text : state->text;
     if (stacked) {
         parts = g_strsplit(selected, " · ", -1);
@@ -235,6 +252,131 @@ button_pressed(GtkWidget *widget, GdkEventButton *event, MonitorState *state)
     return TRUE;
 }
 
+typedef struct {
+    MonitorState *state;
+    guint generation;
+} FanJob;
+
+static void
+fan_job_free(gpointer data)
+{
+    FanJob *job = data;
+    state_unref(job->state);
+    g_free(job);
+}
+
+static void
+fan_status_free(gpointer data)
+{
+    monitor_fan_status_free(data);
+}
+
+static void
+fan_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
+{
+    FanJob *job = task_data;
+    MonitorState *state = job->state;
+    (void) source;
+    (void) cancel;
+    gchar *status = monitor_fan_step();
+    g_mutex_lock(&state->worker_mutex);
+    state->fan_worker_running = FALSE;
+    g_cond_broadcast(&state->worker_done);
+    g_mutex_unlock(&state->worker_mutex);
+    g_task_return_pointer(task, status, fan_status_free);
+}
+
+static gboolean
+fan_timeout(gpointer data)
+{
+    MonitorState *state = data;
+    state->fan_timeout_id = 0;
+    start_fan_refresh(state);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+fan_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+    GTask *task = G_TASK(result);
+    FanJob *job = g_task_get_task_data(task);
+    MonitorState *state = job->state;
+    gchar *status = g_task_propagate_pointer(task, NULL);
+    (void) source;
+    (void) data;
+    state->fan_in_flight = FALSE;
+    if (!state->removed && state->fan_enabled) {
+        if (job->generation == state->fan_generation) {
+            gtk_widget_set_tooltip_text(state->fan_button, status != NULL ? status :
+                                        "Smart fan control on: check failed; retrying");
+            state->fan_timeout_id = g_timeout_add_seconds_full(
+                G_PRIORITY_DEFAULT, 2, fan_timeout, state_ref(state), state_unref);
+        } else {
+            start_fan_refresh(state);
+        }
+    }
+    monitor_fan_status_free(status);
+}
+
+static void
+start_fan_refresh(MonitorState *state)
+{
+    if (state->removed || !state->fan_enabled || state->fan_in_flight)
+        return;
+    state->fan_in_flight = TRUE;
+    g_mutex_lock(&state->worker_mutex);
+    state->fan_worker_running = TRUE;
+    g_mutex_unlock(&state->worker_mutex);
+    FanJob *job = g_new0(FanJob, 1);
+    job->state = state_ref(state);
+    job->generation = state->fan_generation;
+    GTask *task = g_task_new(state->plugin, NULL, fan_done, NULL);
+    g_task_set_task_data(task, job, fan_job_free);
+    g_task_run_in_thread(task, fan_worker);
+    g_object_unref(task);
+}
+
+static void
+fan_toggled(GtkToggleButton *button, MonitorState *state)
+{
+    if (state->removed)
+        return;
+    state->fan_enabled = gtk_toggle_button_get_active(button);
+    state->fan_generation++;
+    if (state->fan_timeout_id != 0) {
+        g_source_remove(state->fan_timeout_id);
+        state->fan_timeout_id = 0;
+    }
+    gtk_widget_set_tooltip_text(GTK_WIDGET(button), state->fan_enabled ?
+        "Smart fan control on: checking…" :
+        "Smart fan control off; last fan level left unchanged");
+    start_fan_refresh(state);
+}
+
+static gboolean
+fan_icon_draw(GtkWidget *widget, cairo_t *cr, gpointer data)
+{
+    GdkRGBA color;
+    (void) data;
+    gtk_style_context_get_color(gtk_widget_get_style_context(widget),
+                               gtk_widget_get_state_flags(widget), &color);
+    cairo_save(cr);
+    gdk_cairo_set_source_rgba(cr, &color);
+    cairo_translate(cr, gtk_widget_get_allocated_width(widget) / 2.0,
+                    gtk_widget_get_allocated_height(widget) / 2.0);
+    for (guint i = 0; i < 3; i++) {
+        cairo_move_to(cr, 0, -2);
+        cairo_curve_to(cr, -6, -9, 6, -9, 5, -3);
+        cairo_curve_to(cr, 4, 0, 2, 1, 0, -2);
+        cairo_fill(cr);
+        cairo_rotate(cr, 2.0 * G_PI / 3.0);
+    }
+    cairo_arc(cr, 0, 0, 1.8, 0, 2.0 * G_PI);
+    cairo_fill(cr);
+    cairo_restore(cr);
+    return FALSE;
+}
+
 static void
 monitor_construct(XfcePanelPlugin *plugin)
 {
@@ -253,7 +395,21 @@ monitor_construct(XfcePanelPlugin *plugin)
     g_signal_connect_data(event_box, "button-press-event", G_CALLBACK(button_pressed),
                           state_ref(state), button_state_unref, 0);
     gtk_container_add(GTK_CONTAINER(event_box), state->label);
-    gtk_container_add(GTK_CONTAINER(plugin), event_box);
+    state->content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    state->fan_button = gtk_toggle_button_new();
+    gtk_button_set_relief(GTK_BUTTON(state->fan_button), GTK_RELIEF_NONE);
+    gtk_widget_set_tooltip_text(state->fan_button,
+                               "Smart fan control off; last fan level left unchanged");
+    atk_object_set_name(gtk_widget_get_accessible(state->fan_button), "Smart fan control");
+    GtkWidget *icon = gtk_drawing_area_new();
+    gtk_widget_set_size_request(icon, 16, 16);
+    g_signal_connect(icon, "draw", G_CALLBACK(fan_icon_draw), NULL);
+    gtk_container_add(GTK_CONTAINER(state->fan_button), icon);
+    g_signal_connect_data(state->fan_button, "toggled", G_CALLBACK(fan_toggled),
+                          state_ref(state), button_state_unref, 0);
+    gtk_box_pack_start(GTK_BOX(state->content), event_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state->content), state->fan_button, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(plugin), state->content);
     g_object_set_data_full(G_OBJECT(plugin), "rust-monitor-state", state,
                            state_destroy);
     g_signal_connect(plugin, "free-data", G_CALLBACK(removed), state);
@@ -264,8 +420,7 @@ monitor_construct(XfcePanelPlugin *plugin)
                      G_CALLBACK(orientation_changed), state);
     xfce_panel_plugin_set_expand(plugin, FALSE);
     mode_changed(plugin, xfce_panel_plugin_get_mode(plugin), state);
-    gtk_widget_show(state->label);
-    gtk_widget_show(event_box);
+    gtk_widget_show_all(state->content);
     start_refresh(state);
 }
 

@@ -51,6 +51,49 @@ find_label(GtkWidget *widget)
     return NULL;
 }
 
+static GtkWidget *
+find_toggle(GtkWidget *widget)
+{
+    if (GTK_IS_TOGGLE_BUTTON(widget))
+        return widget;
+    if (GTK_IS_CONTAINER(widget)) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(widget));
+        GtkWidget *found = NULL;
+        for (GList *p = children; p != NULL && found == NULL; p = p->next)
+            found = find_toggle(p->data);
+        g_list_free(children);
+        return found;
+    }
+    return NULL;
+}
+
+static gboolean
+await_tooltip(GtkWidget *widget, const gchar *needle)
+{
+    gint64 deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+    do {
+        gchar *text = gtk_widget_get_tooltip_text(widget);
+        gboolean found = text != NULL && strstr(text, needle) != NULL;
+        g_free(text);
+        if (found)
+            return TRUE;
+        pump();
+    } while (g_get_monotonic_time() < deadline);
+    return FALSE;
+}
+
+static gboolean
+await_counter(gint (*counter)(void), gint minimum)
+{
+    gint64 deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+    do {
+        if (counter() >= minimum)
+            return TRUE;
+        pump();
+    } while (g_get_monotonic_time() < deadline);
+    return FALSE;
+}
+
 static gboolean
 await_text(GtkWidget *label, const gchar *needle)
 {
@@ -181,7 +224,8 @@ main(int argc, char **argv)
     sigaction(SIGALRM, &action, NULL);
     alarm(70);
 
-    CHECK(argc == 2, "plugin path argument supplied");
+    CHECK(argc == 2 || (argc == 3 && g_str_equal(argv[2], "--fan-stub")),
+          "plugin path argument supplied");
     root = g_dir_make_tmp("rust-monitor-native-XXXXXX", &error);
     CHECK(root != NULL, "isolated temporary config directory created");
     gchar *absolute_root = g_canonicalize_filename(root, NULL);
@@ -252,6 +296,75 @@ main(int argc, char **argv)
     CHECK(GTK_IS_EVENT_BOX(box) &&
           !gtk_event_box_get_visible_window(GTK_EVENT_BOX(box)),
           "label wrapped in invisible-window event box");
+    GtkWidget *fan_button = find_toggle(GTK_WIDGET(plugin));
+    CHECK(fan_button != NULL && gtk_widget_get_visible(fan_button) &&
+          !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+          "fan icon toggle is visible and starts off");
+    CHECK(await_tooltip(fan_button, "last fan level left unchanged"),
+          "off tooltip explains retained fan level");
+    if (argc == 3) {
+        gint (*calls)(void) = NULL, (*running)(void) = NULL, (*overlap)(void) = NULL;
+        CHECK(g_module_symbol(module, "smoke_fan_calls", (gpointer *) &calls) &&
+              g_module_symbol(module, "smoke_fan_running", (gpointer *) &running) &&
+              g_module_symbol(module, "smoke_fan_overlap", (gpointer *) &overlap),
+              "test-only fan backend resolved (no hardware or sudo)");
+        CHECK(calls() == 0, "disabled startup never invokes fan controller");
+        g_clear_pointer(&contents, g_free);
+        contents = g_strdup_printf(
+            "interval_seconds=3600\ncpu_sensor='%s'\nfan_sensors=[]\ndisks=[]\n"
+            "[[extensions]]\nname='Slow'\ncommand=['/bin/sh','-c','touch \"%s\"; sleep 30']\n"
+            "timeout_ms=3000\n", cpu, started);
+        CHECK(put(config, contents), "slow metrics with one-hour refresh configured");
+        gint64 deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+        while (!g_file_test(started, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < deadline)
+            pump();
+        CHECK(g_file_test(started, G_FILE_TEST_EXISTS), "slow metric collection is in flight");
+        gint64 before = g_get_monotonic_time();
+        gtk_button_clicked(GTK_BUTTON(fan_button));
+        CHECK(g_get_monotonic_time() - before < 100000 &&
+              gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+              "fan enable returns immediately without blocking GTK");
+        CHECK(await_counter(running, 1) && await_tooltip(fan_button, "simulated permission failure"),
+              "independent fan check reports failure while metric script is still running");
+        CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label) &&
+              gtk_widget_get_visible(fan_button) &&
+              gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+              "RAM-only mode leaves fan icon visible and enabled");
+        CHECK(await_tooltip(fan_button, "level auto (simulated)") && calls() >= 2,
+              "fan loop retries and recovers despite one-hour metric delay");
+        CHECK(await_counter(calls, 3) && running() == 1,
+              "next fan check starts for off-during-flight test");
+        gtk_button_clicked(GTK_BUTTON(fan_button));
+        deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
+        gint stopped_calls = calls();
+        while (g_get_monotonic_time() < deadline)
+            pump();
+        CHECK(!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)) &&
+              calls() == stopped_calls && running() == 0 &&
+              await_tooltip(fan_button, "last fan level left unchanged"),
+              "off cancels future checks and ignores stale in-flight status without restoring auto");
+        gtk_button_clicked(GTK_BUTTON(fan_button));
+        CHECK(await_counter(running, 1), "fan check starts before rapid toggles");
+        for (guint i = 0; i < 10; i++)
+            gtk_button_clicked(GTK_BUTTON(fan_button));
+        CHECK(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)) &&
+              await_counter(calls, stopped_calls + 2) && overlap() == 0,
+              "rapid off/on toggles serialize checks and start a fresh generation");
+        CHECK(await_counter(running, 1), "fan worker active before widget destruction");
+        before = g_get_monotonic_time();
+        gtk_widget_destroy(window);
+        window = NULL;
+        CHECK(running() == 0 && g_get_monotonic_time() - before < 2 * G_TIME_SPAN_SECOND,
+              "removal waits for fan worker without GTK deadlock or a restoration command");
+        stopped_calls = calls();
+        deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
+        while (g_get_monotonic_time() < deadline)
+            pump();
+        CHECK(calls() == stopped_calls && overlap() == 0,
+              "removed plugin never schedules another fan check");
+        result = 0;
+        goto cleanup;
+    }
     inline_text = g_strdup(text);
     CHECK(press(box, GDK_BUTTON_PRESS, 3, 0) && ram_only(label),
           "ordinary right-click immediately selects only available RAM");
@@ -301,11 +414,15 @@ main(int argc, char **argv)
     g_clear_pointer(&tooltip, g_free);
     g_signal_emit_by_name(plugin, "mode-changed", XFCE_PANEL_PLUGIN_MODE_DESKBAR);
     CHECK(strchr(gtk_label_get_text(GTK_LABEL(label)), '\n') &&
-          !strstr(gtk_label_get_text(GTK_LABEL(label)), " · "),
-          "injected deskbar mode callback stacks metrics (not live panel orientation)");
+          !strstr(gtk_label_get_text(GTK_LABEL(label)), " · ") &&
+          gtk_orientable_get_orientation(GTK_ORIENTABLE(gtk_widget_get_parent(box))) ==
+              GTK_ORIENTATION_VERTICAL && gtk_widget_get_visible(fan_button),
+          "injected deskbar mode stacks metrics and fan icon (not live panel orientation)");
     g_signal_emit_by_name(plugin, "mode-changed", XFCE_PANEL_PLUGIN_MODE_HORIZONTAL);
-    CHECK(g_str_equal(gtk_label_get_text(GTK_LABEL(label)), inline_text),
-          "injected horizontal mode callback restores inline metrics");
+    CHECK(g_str_equal(gtk_label_get_text(GTK_LABEL(label)), inline_text) &&
+          gtk_orientable_get_orientation(GTK_ORIENTABLE(gtk_widget_get_parent(box))) ==
+              GTK_ORIENTATION_HORIZONTAL,
+          "injected horizontal mode callback restores inline metrics and icon layout");
     g_signal_emit_by_name(plugin, "orientation-changed", GTK_ORIENTATION_VERTICAL);
     CHECK(strchr(gtk_label_get_text(GTK_LABEL(label)), '\n') != NULL,
           "injected vertical orientation callback stacks metrics");
