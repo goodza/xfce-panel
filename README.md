@@ -30,17 +30,18 @@ sudo apt install build-essential pkg-config libxfce4panel-2.0-dev libxfce4ui-2-d
 make
 ```
 
-Requires XFCE4 panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
+Requires XFCE4 panel **4.19 or newer** (including 4.20), panel API 2.0, GTK3, GIO, Cargo, and a Linux ELF linker supporting `-z nodelete`. `make` builds a PIC Rust release library, CLI, and `target/native/panel/librust-monitor.so`. Custom `CARGO_TARGET_DIR` is supported. Cargo may download crates on the first build.
 
-**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK offscreen test pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. A second test module uses a simulated fan backend to verify nonblocking toggles, independent polling, failure/retry, rapid off/on transitions, and teardown without sudo or hardware writes. Popup tests cover slider bounds, per-instance reload, invalid settings, save failure/recovery, and teardown with default and disabled animations. Escape is tested by injecting GTK's key signal; physical keyboard and outside-click routing still need a live-panel check. Staged installation also passes. Real fan writes, sudo authorization, actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
+**Verification status:** Native compilation and shared-library loading pass on XFCE 4.20.7 / GTK 3.24.52. Rust checks, the C ABI smoke test, and an isolated GTK test with transparent native windows pass. The native test checks compact readings, the hidden second fan's retained tooltip, raw CPU warning boundaries and reset, real RAM/disk metrics, literal text, right-click toggles and modifier propagation, polling/reload while minimized, orientation callbacks, and removal during a running extension. A second test module uses a simulated fan backend to verify nonblocking toggles, independent polling, failure/retry, rapid off/on transitions, and teardown without sudo or hardware writes. Popup tests cover slider bounds, per-instance reload, invalid settings, save failure/recovery, and teardown with default and disabled animations. A separate-process X11 GtkSocket/GtkPlug test verifies the slider popup is a native toplevel that is not clipped to panel height. Escape is tested by injecting GTK's key signal; physical keyboard and outside-click routing still need a live-panel check. Staged installation also passes. Real fan writes, sudo authorization, actual panel discovery, external-wrapper integration, and live panel orientation remain unverified; your panel configuration has not been changed.
 
 ```sh
 make test-native
+make test-embedded  # X11-only, separate-process XEmbed regression
 # For a headless environment with Xvfb installed:
 # xvfb-run -a make test-native
 ```
 
-The native test requires a working GTK display even though it uses an offscreen window. It uses temporary configuration, never your real config; missing display is a failure, not a skipped pass.
+The native test requires a working GTK display and uses transparent native windows, because XFCE popup positioning needs real window origins. `test-embedded` additionally requires X11 and runs its socket and plugin in separate processes. Both use temporary configuration, never your real config or fan-control writes; a missing display is a failure, not a skipped pass.
 
 ## Install into XFCE's plugin directories
 
@@ -107,7 +108,7 @@ Click the fan icon to enable or disable control. It starts **off** each time the
 - **Fan off below:** lower threshold, initially **58°C**.
 - **Automatic above:** upper threshold, initially **60°C**.
 
-Both sliders use 1°C steps from 30–90°C. They cannot cross: the lower threshold stays at least 1°C below the upper. Changes apply on the next fan check while dragging; an in-flight check may finish with its previous range. Adjusting the range never enables fan control. Click outside or press Escape to close the popup. The red CPU display warning stays fixed at >80°C.
+Both sliders use 1°C steps from 30–90°C. They cannot cross: the lower threshold stays at least 1°C below the upper. Changes apply on the next fan check while dragging; an in-flight check may finish with its previous range. Adjusting the range never enables fan control. Click outside or press Escape to close the popup. It uses XFCE's native popup-window API so the sliders can appear outside the external plugin's panel-sized window. The red CPU display warning stays fixed at >80°C.
 
 Each panel instance remembers its range in XFCE's per-instance rc file, separately from `rust-monitor.toml`; fan enablement still starts off. Missing saved settings use 58–60°C. Invalid saved settings show a warning and use those defaults. If saving fails, the selected range still works for this session and the popup shows **Not saved**; the next adjustment retries. Existing malformed rc files are not overwritten. Manual rc edits take effect when the instance restarts.
 
@@ -162,7 +163,7 @@ Collection normally runs off the UI thread with one job in flight. Removing the 
 
 For the remaining live-panel checks:
 
-1. Run `make test-native`, then install into the panel's actual directories.
+1. Run `make test-native` and, on X11, `make test-embedded`, then install into the panel's actual directories.
 2. Add Rust Monitor; check inline readings and plain-text hover details.
 3. Edit the config and verify reload, invalid-config diagnostics, explicit sensors, and additional filesystems.
 4. Add a successful script, failing script, and timed-out script; verify hidden failures and tooltip errors.

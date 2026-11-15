@@ -17,13 +17,12 @@ typedef struct {
     guint fan_generation;
     guint off_celsius;
     guint auto_celsius;
-    GtkWidget *settings_popover;
+    GtkWidget *settings_popup;
     GtkWidget *off_scale;
     GtkWidget *auto_scale;
     GtkWidget *settings_status;
     gchar *settings_message;
     gboolean updating_scales;
-    gboolean popup_autohide_blocked;
     GtkWidget *settings_toplevel;
     gulong toplevel_destroy_id;
     gchar *text;
@@ -79,17 +78,9 @@ stop_refresh(MonitorState *state)
         state->settings_toplevel = NULL;
         state->toplevel_destroy_id = 0;
     }
-    if (state->settings_popover != NULL) {
-        GtkWidget *toplevel = gtk_widget_get_toplevel(state->settings_popover);
-        gtk_widget_hide(state->settings_popover);
-        if (GTK_IS_WINDOW(toplevel)) {
-            GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(toplevel));
-            if (focus != NULL &&
-                (gtk_widget_is_ancestor(focus, GTK_WIDGET(state->plugin)) ||
-                 gtk_widget_is_ancestor(focus, state->settings_popover)))
-                gtk_window_set_focus(GTK_WINDOW(toplevel), NULL);
-        }
-        gtk_widget_destroy(state->settings_popover);
+    if (state->settings_popup != NULL) {
+        gtk_widget_hide(state->settings_popup);
+        gtk_widget_destroy(state->settings_popup);
     }
     state->label = NULL;
     state->content = NULL;
@@ -373,30 +364,10 @@ range_changed(GtkRange *range, MonitorState *state)
 }
 
 static void
-popover_hidden(GtkWidget *widget, MonitorState *state)
+settings_popup_destroyed(GtkWidget *widget, MonitorState *state)
 {
     (void) widget;
-    if (state->popup_autohide_blocked) {
-        xfce_panel_plugin_block_autohide(state->plugin, FALSE);
-        state->popup_autohide_blocked = FALSE;
-    }
-}
-
-static void
-popover_shown(GtkWidget *widget, MonitorState *state)
-{
-    (void) widget;
-    if (!state->popup_autohide_blocked) {
-        xfce_panel_plugin_block_autohide(state->plugin, TRUE);
-        state->popup_autohide_blocked = TRUE;
-    }
-}
-
-static void
-popover_destroyed(GtkWidget *widget, MonitorState *state)
-{
-    popover_hidden(widget, state);
-    state->settings_popover = NULL;
+    state->settings_popup = NULL;
     state->off_scale = NULL;
     state->auto_scale = NULL;
     state->settings_status = NULL;
@@ -405,11 +376,11 @@ popover_destroyed(GtkWidget *widget, MonitorState *state)
 static void
 settings_toplevel_destroyed(GtkWidget *widget, MonitorState *state)
 {
+    (void) widget;
     state->settings_toplevel = NULL;
     state->toplevel_destroy_id = 0;
-    if (state->settings_popover != NULL)
-        gtk_widget_hide(state->settings_popover);
-    gtk_window_set_focus(GTK_WINDOW(widget), NULL);
+    if (state->settings_popup != NULL)
+        gtk_widget_hide(state->settings_popup);
 }
 
 static GtkWidget *
@@ -428,7 +399,8 @@ temperature_scale(const gchar *name, guint value)
 static void
 construct_settings(MonitorState *state, GtkWidget *anchor)
 {
-    state->settings_popover = gtk_popover_new(anchor);
+    state->settings_popup = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_attached_to(GTK_WINDOW(state->settings_popup), GTK_WIDGET(state->plugin));
     GtkWidget *toplevel = gtk_widget_get_toplevel(anchor);
     if (GTK_IS_WINDOW(toplevel)) {
         state->settings_toplevel = toplevel;
@@ -436,13 +408,8 @@ construct_settings(MonitorState *state, GtkWidget *anchor)
             toplevel, "destroy", G_CALLBACK(settings_toplevel_destroyed),
             state_ref(state), button_state_unref, 0);
     }
-    gtk_widget_set_name(state->settings_popover, "fan-temperature-settings");
-    gtk_popover_set_position(GTK_POPOVER(state->settings_popover), GTK_POS_BOTTOM);
-    g_signal_connect_data(state->settings_popover, "show", G_CALLBACK(popover_shown),
-                          state_ref(state), button_state_unref, 0);
-    g_signal_connect_data(state->settings_popover, "hide", G_CALLBACK(popover_hidden),
-                          state_ref(state), button_state_unref, 0);
-    g_signal_connect_data(state->settings_popover, "destroy", G_CALLBACK(popover_destroyed),
+    gtk_widget_set_name(state->settings_popup, "fan-temperature-settings");
+    g_signal_connect_data(state->settings_popup, "destroy", G_CALLBACK(settings_popup_destroyed),
                           state_ref(state), button_state_unref, 0);
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_container_set_border_width(GTK_CONTAINER(box), 12);
@@ -466,19 +433,18 @@ construct_settings(MonitorState *state, GtkWidget *anchor)
     gtk_label_set_line_wrap(GTK_LABEL(state->settings_status), TRUE);
     gtk_label_set_max_width_chars(GTK_LABEL(state->settings_status), 45);
     gtk_box_pack_start(GTK_BOX(box), state->settings_status, FALSE, FALSE, 0);
-    gtk_container_add(GTK_CONTAINER(state->settings_popover), box);
+    gtk_container_add(GTK_CONTAINER(state->settings_popup), box);
     gtk_widget_show_all(box);
 }
 
 static gboolean
 button_pressed(GtkWidget *widget, GdkEventButton *event, MonitorState *state)
 {
-    (void) widget;
     if (state->removed || (event->state & GDK_CONTROL_MASK) != 0)
         return FALSE;
     if (event->button == 1) {
-        if (event->type == GDK_BUTTON_PRESS && state->settings_popover != NULL)
-            gtk_popover_popup(GTK_POPOVER(state->settings_popover));
+        if (event->type == GDK_BUTTON_PRESS && state->settings_popup != NULL)
+            xfce_panel_plugin_popup_window(state->plugin, GTK_WINDOW(state->settings_popup), widget);
         return event->type == GDK_BUTTON_PRESS || event->type == GDK_2BUTTON_PRESS ||
                event->type == GDK_3BUTTON_PRESS;
     }

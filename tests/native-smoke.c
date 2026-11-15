@@ -3,6 +3,7 @@
 #include <gmodule.h>
 #include <glib/gstdio.h>
 #include <libxfce4panel/libxfce4panel.h>
+#include <gtk/gtkx.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -89,6 +90,14 @@ find_named(GtkWidget *widget, const gchar *name)
 {
     FindWidget search = { name, NULL };
     find_named_child(widget, &search);
+    GList *windows = gtk_window_list_toplevels();
+    for (GList *p = windows; p != NULL && search.found == NULL; p = p->next) {
+        GtkWidget *attached = gtk_window_get_attached_to(GTK_WINDOW(p->data));
+        if (attached != NULL &&
+            (attached == widget || gtk_widget_is_ancestor(attached, widget)))
+            find_named_child(p->data, &search);
+    }
+    g_list_free(windows);
     return search.found;
 }
 
@@ -302,7 +311,8 @@ main(int argc, char **argv)
     sigaction(SIGALRM, &action, NULL);
     alarm(70);
 
-    CHECK(argc == 2 || (argc == 3 && g_str_equal(argv[2], "--fan-stub")),
+    gboolean embedded = argc == 3 && g_str_has_prefix(argv[2], "--embedded=");
+    CHECK(argc == 2 || (argc == 3 && (g_str_equal(argv[2], "--fan-stub") || embedded)),
           "plugin path argument supplied");
     root = g_dir_make_tmp("rust-monitor-native-XXXXXX", &error);
     CHECK(root != NULL, "isolated temporary config directory created");
@@ -341,12 +351,16 @@ main(int argc, char **argv)
     plugin = construct("rust-monitor", 27182, "Native smoke", "Isolated test", NULL,
                        gdk_screen_get_default());
     CHECK(plugin != NULL, "exported factory constructed real XFCE widget");
-    window = gtk_offscreen_window_new();
+    window = embedded ? gtk_plug_new((Window) g_ascii_strtoull(argv[2] + strlen("--embedded="), NULL, 10)) :
+                        gtk_window_new(GTK_WINDOW_POPUP);
+    gtk_widget_set_opacity(window, 0);
+    if (!embedded)
+        gtk_window_move(GTK_WINDOW(window), -10000, -10000);
     gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(plugin));
     gtk_widget_show_all(window);
     label = find_label(GTK_WIDGET(plugin));
     CHECK(gtk_widget_get_realized(GTK_WIDGET(plugin)) && label != NULL,
-          "offscreen realization invoked registered constructor and created label");
+          "transparent native host invoked registered constructor and created label");
     CHECK(await_text(label, "Trusted: <ok>"), "initial asynchronous snapshot arrived within 8 seconds");
     const gchar *text = gtk_label_get_text(GTK_LABEL(label));
     CHECK(strstr(text, "42.5 °C") && strstr(text, "1234 RPM") &&
@@ -388,6 +402,39 @@ main(int argc, char **argv)
     GtkWidget *range_status = find_named(window, "fan-settings-status");
     CHECK(popover != NULL && off_scale != NULL && auto_scale != NULL && range_status != NULL,
           "temperature popup and both named sliders constructed");
+    gtk_widget_set_opacity(popover, 0);
+    if (embedded) {
+        CHECK(GTK_IS_PLUG(window) && gtk_plug_get_embedded(GTK_PLUG(window)),
+              "real cross-process XEmbed host contains the plugin");
+        CHECK(GTK_IS_WINDOW(popover),
+              "sliders use an independent popup window rather than a clipped GtkPlug child");
+        CHECK(press(box, GDK_BUTTON_PRESS, 1, 0), "embedded plugin handles left-click");
+        gint64 deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
+        while ((!gtk_widget_get_mapped(popover) || gtk_widget_get_allocated_height(popover) < 100) &&
+               g_get_monotonic_time() < deadline)
+            pump();
+        CHECK(gtk_widget_get_mapped(popover) && gtk_widget_get_allocated_height(popover) >
+              gtk_widget_get_allocated_height(window) &&
+              gdk_window_get_toplevel(gtk_widget_get_window(popover)) !=
+              gdk_window_get_toplevel(gtk_widget_get_window(window)),
+              "mapped sliders extend beyond panel height in a separate native toplevel");
+        gtk_range_set_value(GTK_RANGE(off_scale), 45);
+        gtk_range_set_value(GTK_RANGE(auto_scale), 70);
+        range_rc = xfce_panel_plugin_save_location(plugin, FALSE);
+        CHECK(range_rc != NULL && gtk_range_get_value(GTK_RANGE(off_scale)) == 45 &&
+              gtk_range_get_value(GTK_RANGE(auto_scale)) == 70 &&
+              !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+              "embedded popup sliders apply without enabling hardware control");
+        CHECK(dismiss_popup_via_key_signal(popover), "embedded popup handles Escape");
+        CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
+              "embedded popup can reopen");
+        g_signal_connect(popover, "destroy", G_CALLBACK(observe_destroy), &popup_destroyed);
+        gtk_widget_destroy(window);
+        window = NULL;
+        CHECK(popup_destroyed, "embedded plugin removal destroys the open popup");
+        result = 0;
+        goto cleanup;
+    }
     CHECK(!gtk_widget_get_visible(popover) &&
           gtk_range_get_value(GTK_RANGE(off_scale)) == 58 &&
           gtk_range_get_value(GTK_RANGE(auto_scale)) == 60,
