@@ -187,6 +187,30 @@ await_text(GtkWidget *label, const gchar *needle)
 }
 
 static gboolean
+valid_fan_level_text(const gchar *text)
+{
+    return g_str_equal(text, "auto") || g_str_equal(text, "?") ||
+           (text[0] >= '0' && text[0] <= '7' && text[1] == '\0');
+}
+
+static gboolean
+await_fan_level(GtkWidget *label)
+{
+    gint64 deadline = g_get_monotonic_time() + 8 * G_TIME_SPAN_SECOND;
+    do {
+        gchar *tooltip = gtk_widget_get_tooltip_text(label);
+        gboolean observed = tooltip != NULL &&
+            strstr(tooltip, "waiting for first observation") == NULL;
+        gboolean valid = valid_fan_level_text(gtk_label_get_text(GTK_LABEL(label)));
+        g_free(tooltip);
+        if (observed && valid)
+            return TRUE;
+        pump();
+    } while (g_get_monotonic_time() < deadline);
+    return FALSE;
+}
+
+static gboolean
 cpu_color_matches(GtkWidget *label, gboolean hot)
 {
     PangoAttrList *list = gtk_label_get_attributes(GTK_LABEL(label));
@@ -409,6 +433,11 @@ main(int argc, char **argv)
     CHECK(fan_button != NULL && gtk_widget_get_visible(fan_button) &&
           !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
           "fan icon toggle is visible and starts off");
+    GtkWidget *fan_level = find_named(window, "fan-hardware-level");
+    CHECK(fan_level != NULL && gtk_widget_get_visible(fan_level) &&
+          gtk_widget_get_parent(fan_level) == gtk_widget_get_parent(fan_button) &&
+          await_fan_level(fan_level),
+          "hardware fan level appears as a valid bare value beside the fan icon");
     CHECK(await_tooltip(fan_button, "last fan level left unchanged"),
           "off tooltip explains retained fan level");
     GtkWidget *popover = find_named(window, "fan-temperature-settings");
@@ -529,7 +558,10 @@ main(int argc, char **argv)
     if (argc == 3) {
         gint (*calls)(void) = NULL, (*running)(void) = NULL, (*overlap)(void) = NULL;
         gint (*fan_off)(void) = NULL, (*fan_auto)(void) = NULL;
+        gint (*level_calls)(void) = NULL, (*level_running)(void) = NULL;
+        gint (*level_overlap)(void) = NULL;
         void (*set_fail)(gint) = NULL;
+        void (*level_set)(gint) = NULL;
         CHECK(g_module_symbol(module, "smoke_fan_calls", (gpointer *) &calls) &&
               g_module_symbol(module, "smoke_fan_running", (gpointer *) &running) &&
               g_module_symbol(module, "smoke_fan_overlap", (gpointer *) &overlap) &&
@@ -537,7 +569,27 @@ main(int argc, char **argv)
               g_module_symbol(module, "smoke_fan_auto", (gpointer *) &fan_auto) &&
               g_module_symbol(module, "smoke_fan_set_fail", (gpointer *) &set_fail),
               "test-only fan backend resolved (no hardware or sudo)");
+        CHECK(g_module_symbol(module, "smoke_fan_level_calls", (gpointer *) &level_calls) &&
+              g_module_symbol(module, "smoke_fan_level_running", (gpointer *) &level_running) &&
+              g_module_symbol(module, "smoke_fan_level_overlap", (gpointer *) &level_overlap) &&
+              g_module_symbol(module, "smoke_fan_level_set", (gpointer *) &level_set),
+              "test-only fan-level backend resolved (read-only, no hardware)");
         CHECK(calls() == 0, "disabled startup never invokes fan controller");
+        GtkWidget *level_label = find_named(window, "fan-hardware-level");
+        level_set(3);
+        CHECK(level_label != NULL && await_text(level_label, "3") &&
+              await_tooltip(level_label, "Current fan level: 3") &&
+              level_running() == 0 && level_overlap() == 0,
+              "bare hardware level 3 refreshes with one observation in flight");
+        level_set(100);
+        CHECK(await_text(level_label, "auto") &&
+              await_tooltip(level_label, "Current fan level: auto"),
+              "automatic hardware level displays as bare auto");
+        level_set(99);
+        CHECK(await_text(level_label, "?") &&
+              await_tooltip(level_label, "simulated unreadable") && calls() == 0 &&
+              !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
+              "unreadable level shows ? with a diagnostic and never triggers control");
         g_clear_pointer(&contents, g_free);
         contents = g_strdup_printf(
             "interval_seconds=3600\ncpu_sensor='%s'\nfan_sensors=[]\ndisks=[]\n"
@@ -548,6 +600,12 @@ main(int argc, char **argv)
         while (!g_file_test(started, G_FILE_TEST_EXISTS) && g_get_monotonic_time() < deadline)
             pump();
         CHECK(g_file_test(started, G_FILE_TEST_EXISTS), "slow metric collection is in flight");
+        gint level_before = level_calls();
+        gint64 level_deadline = g_get_monotonic_time() + 4 * G_TIME_SPAN_SECOND;
+        while (level_calls() < level_before + 2 && g_get_monotonic_time() < level_deadline)
+            pump();
+        CHECK(level_calls() >= level_before + 2 && calls() == 0,
+              "one-second level observation continues independently of slow metrics and disabled control");
         gint64 before = g_get_monotonic_time();
         gtk_button_clicked(GTK_BUTTON(fan_button));
         CHECK(g_get_monotonic_time() - before < 100000 &&
@@ -566,6 +624,10 @@ main(int argc, char **argv)
               gtk_widget_get_visible(fan_button) &&
               gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)),
               "RAM-only mode leaves fan icon visible and enabled");
+        level_set(6);
+        CHECK(await_text(level_label, "6") && gtk_widget_get_visible(level_label) &&
+              await_tooltip(level_label, "Current fan level: 6"),
+              "hardware level stays visible and refreshes in RAM-only mode");
         CHECK(await_tooltip(fan_button, "level auto (simulated)") && calls() >= 2 &&
               fan_off() == 50 && fan_auto() == 75,
               "next fan check receives new range and retries despite one-hour metric delay");
@@ -587,8 +649,9 @@ main(int argc, char **argv)
         for (guint i = 0; i < 10; i++)
             gtk_button_clicked(GTK_BUTTON(fan_button));
         CHECK(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(fan_button)) &&
-              await_counter(calls, stopped_calls + 2) && overlap() == 0,
-              "rapid off/on toggles serialize checks and start a fresh generation");
+              await_counter(calls, stopped_calls + 2) && overlap() == 0 &&
+              level_overlap() == 0,
+              "rapid off/on toggles serialize checks and observe levels one at a time");
         set_fail(1);
         CHECK(await_label(range_status, "simulated permission failure"),
               "forced fan failure repopulates the popup error area");
@@ -598,20 +661,26 @@ main(int argc, char **argv)
         set_fail(0);
         gtk_button_clicked(GTK_BUTTON(fan_button));
         CHECK(await_counter(running, 1), "fan worker active before widget destruction");
+        gint level_calls_before = level_calls();
+        CHECK(await_counter(level_calls, level_calls_before + 1) && level_running() == 1,
+              "level observation is in flight before removal");
         g_signal_connect(popover, "destroy", G_CALLBACK(observe_destroy), &popup_destroyed);
         CHECK(press(box, GDK_BUTTON_PRESS, 1, 0) && gtk_widget_get_visible(popover),
               "popup opened before removal during fan work");
         before = g_get_monotonic_time();
         gtk_widget_destroy(window);
         window = NULL;
-        CHECK(popup_destroyed && running() == 0 && g_get_monotonic_time() - before < 2 * G_TIME_SPAN_SECOND,
-              "removal waits for fan worker without GTK deadlock or a restoration command");
+        CHECK(popup_destroyed && running() == 0 && level_running() == 0 &&
+              g_get_monotonic_time() - before < 2 * G_TIME_SPAN_SECOND,
+              "removal waits for fan and level workers without GTK deadlock or a command");
         stopped_calls = calls();
+        gint stopped_level_calls = level_calls();
         deadline = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
         while (g_get_monotonic_time() < deadline)
             pump();
-        CHECK(calls() == stopped_calls && overlap() == 0,
-              "removed plugin never schedules another fan check");
+        CHECK(calls() == stopped_calls && level_calls() == stopped_level_calls &&
+              overlap() == 0 && level_overlap() == 0,
+              "removed plugin never schedules another fan check or level observation");
         result = 0;
         goto cleanup;
     }

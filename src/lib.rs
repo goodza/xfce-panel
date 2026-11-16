@@ -1,6 +1,7 @@
 mod config;
 mod extension;
 mod fan;
+mod fan_level;
 mod sensors;
 
 use std::{
@@ -208,6 +209,44 @@ pub unsafe extern "C" fn monitor_fan_result_free(result: *mut MonitorFanResult) 
         unsafe {
             let result = Box::from_raw(result);
             drop(CString::from_raw(result.status));
+        }
+    }
+}
+
+#[repr(C)]
+pub struct MonitorFanLevel {
+    pub text: *mut c_char,
+    pub tooltip: *mut c_char,
+    pub failed: u32,
+}
+
+/// Read the actual ThinkPad fan level without writing hardware or running commands.
+/// Never calls GTK. Returns owned text/tooltip with a failure flag; NULL on panic.
+#[no_mangle]
+pub extern "C" fn monitor_fan_level_read() -> *mut MonitorFanLevel {
+    std::panic::catch_unwind(|| {
+        let result = fan_level::read();
+        Box::into_raw(Box::new(MonitorFanLevel {
+            text: c_string(result.text).into_raw(),
+            tooltip: c_string(result.tooltip).into_raw(),
+            failed: u32::from(result.failed),
+        }))
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Release a fan-level result and both strings. NULL is a no-op.
+///
+/// # Safety
+/// level must be NULL or an unmodified, unfreed pointer returned by monitor_fan_level_read.
+#[no_mangle]
+pub unsafe extern "C" fn monitor_fan_level_free(level: *mut MonitorFanLevel) {
+    if !level.is_null() {
+        // SAFETY: caller returns the original allocations exactly once.
+        unsafe {
+            let level = Box::from_raw(level);
+            drop(CString::from_raw(level.text));
+            drop(CString::from_raw(level.tooltip));
         }
     }
 }

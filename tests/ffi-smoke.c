@@ -17,5 +17,17 @@ int main(int argc, char **argv)
     assert(snapshot->cpu_hot <= 1);
     monitor_snapshot_free(snapshot);
     monitor_snapshot_free(NULL);
+
+    MonitorFanLevel *level = monitor_fan_level_read();
+    assert(level != NULL);
+    assert(level->text != NULL && level->tooltip != NULL);
+    assert(level->failed <= 1);
+    assert((strcmp(level->text, "?") == 0) == (level->failed == 1));
+    assert(strcmp(level->text, "auto") == 0 ||
+           (level->text[0] >= '0' && level->text[0] <= '7' && level->text[1] == '\0') ||
+           strcmp(level->text, "?") == 0);
+    assert(strlen(level->tooltip) > 0);
+    monitor_fan_level_free(level);
+    monitor_fan_level_free(NULL);
     return 0;
 }

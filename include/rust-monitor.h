@@ -44,6 +44,24 @@ MonitorFanResult *monitor_fan_step(uint32_t off_celsius, uint32_t auto_celsius);
 /* Release a result from monitor_fan_step and its status, exactly once. NULL allowed. */
 void monitor_fan_result_free(MonitorFanResult *result);
 
+typedef struct MonitorFanLevel {
+    char *text;    /* owned display level: "0".."7", "auto", or "?" */
+    char *tooltip; /* owned plain-text detail; describes unavailability */
+    uint32_t failed; /* 1 when the display level is "?", else 0 */
+} MonitorFanLevel;
+
+/* One blocking, read-only observation of the actual ThinkPad fan level from
+ * /proc/acpi/ibm/fan; call off the GTK thread. Never writes hardware, runs a
+ * command, or consults smart-control state. Invalid, ambiguous, unsupported, or
+ * unreadable output yields text "?" with a diagnostic tooltip and failed=1.
+ * Returns an owned result, or NULL on a contained panic. Rebuild Rust and the
+ * adapter together when this signature changes. */
+MonitorFanLevel *monitor_fan_level_read(void);
+
+/* Release a result from monitor_fan_level_read and both strings, exactly once.
+ * NULL allowed. */
+void monitor_fan_level_free(MonitorFanLevel *level);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,11 +10,15 @@ typedef struct {
     GtkWidget *label;
     GtkWidget *content;
     GtkWidget *fan_button;
+    GtkWidget *fan_level_label;
     gboolean fan_enabled;
     gboolean fan_in_flight;
     gboolean fan_worker_running;
     guint fan_timeout_id;
     guint fan_generation;
+    gboolean fan_level_in_flight;
+    gboolean fan_level_worker_running;
+    guint fan_level_timeout_id;
     guint off_celsius;
     guint auto_celsius;
     GtkWidget *settings_popup;
@@ -41,6 +45,7 @@ typedef struct {
 
 static void start_refresh(MonitorState *state);
 static void start_fan_refresh(MonitorState *state);
+static void start_fan_level_refresh(MonitorState *state);
 
 static MonitorState *
 state_ref(MonitorState *state)
@@ -88,17 +93,23 @@ stop_refresh(MonitorState *state)
     state->label = NULL;
     state->content = NULL;
     state->fan_button = NULL;
+    state->fan_level_label = NULL;
     state->fan_enabled = FALSE;
     if (state->fan_timeout_id != 0) {
         g_source_remove(state->fan_timeout_id);
         state->fan_timeout_id = 0;
+    }
+    if (state->fan_level_timeout_id != 0) {
+        g_source_remove(state->fan_level_timeout_id);
+        state->fan_level_timeout_id = 0;
     }
     if (state->timeout_id != 0) {
         g_source_remove(state->timeout_id);
         state->timeout_id = 0;
     }
     g_mutex_lock(&state->worker_mutex);
-    while (state->worker_running || state->fan_worker_running)
+    while (state->worker_running || state->fan_worker_running ||
+           state->fan_level_worker_running)
         g_cond_wait(&state->worker_done, &state->worker_mutex);
     g_mutex_unlock(&state->worker_mutex);
 }
@@ -255,6 +266,77 @@ start_refresh(MonitorState *state)
     task = g_task_new(state->plugin, NULL, collect_done, NULL);
     g_task_set_task_data(task, state_ref(state), state_unref);
     g_task_run_in_thread(task, collect_worker);
+    g_object_unref(task);
+}
+
+static void
+fan_level_result_free(gpointer data)
+{
+    monitor_fan_level_free(data);
+}
+
+static void
+fan_level_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
+{
+    MonitorState *state = task_data;
+    MonitorFanLevel *result;
+
+    (void) source;
+    (void) cancel;
+    result = monitor_fan_level_read();
+    g_mutex_lock(&state->worker_mutex);
+    state->fan_level_worker_running = FALSE;
+    g_cond_broadcast(&state->worker_done);
+    g_mutex_unlock(&state->worker_mutex);
+    g_task_return_pointer(task, result, fan_level_result_free);
+}
+
+static gboolean
+fan_level_timeout(gpointer data)
+{
+    MonitorState *state = data;
+
+    state->fan_level_timeout_id = 0;
+    start_fan_level_refresh(state);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+fan_level_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+    GTask *task = G_TASK(result);
+    MonitorState *state = g_task_get_task_data(task);
+    MonitorFanLevel *level = g_task_propagate_pointer(task, NULL);
+
+    (void) source;
+    (void) data;
+    state->fan_level_in_flight = FALSE;
+    if (!state->removed) {
+        const gchar *text = level != NULL && level->text != NULL ? level->text : "?";
+        const gchar *tooltip = level != NULL && level->tooltip != NULL ? level->tooltip :
+            "Fan level unavailable: observation failed";
+        gtk_label_set_text(GTK_LABEL(state->fan_level_label), text);
+        gtk_widget_set_tooltip_text(state->fan_level_label, tooltip);
+        state->fan_level_timeout_id = g_timeout_add_seconds_full(
+            G_PRIORITY_DEFAULT, 1, fan_level_timeout, state_ref(state), state_unref);
+    }
+    monitor_fan_level_free(level);
+}
+
+static void
+start_fan_level_refresh(MonitorState *state)
+{
+    GTask *task;
+
+    if (state->removed || state->fan_level_in_flight)
+        return;
+    state->fan_level_in_flight = TRUE;
+    g_mutex_lock(&state->worker_mutex);
+    state->fan_level_worker_running = TRUE;
+    g_mutex_unlock(&state->worker_mutex);
+    task = g_task_new(state->plugin, NULL, fan_level_done, NULL);
+    g_task_set_task_data(task, state_ref(state), state_unref);
+    g_task_run_in_thread(task, fan_level_worker);
     g_object_unref(task);
 }
 
@@ -666,8 +748,16 @@ monitor_construct(XfcePanelPlugin *plugin)
     gtk_container_add(GTK_CONTAINER(state->fan_button), icon);
     g_signal_connect_data(state->fan_button, "toggled", G_CALLBACK(fan_toggled),
                           state_ref(state), button_state_unref, 0);
+    state->fan_level_label = gtk_label_new("?");
+    gtk_widget_set_name(state->fan_level_label, "fan-hardware-level");
+    gtk_label_set_xalign(GTK_LABEL(state->fan_level_label), 0.5);
+    gtk_widget_set_tooltip_text(state->fan_level_label,
+                                "Fan level unavailable: waiting for first observation");
+    atk_object_set_name(gtk_widget_get_accessible(state->fan_level_label),
+                        "Current hardware fan level");
     gtk_box_pack_start(GTK_BOX(state->content), event_box, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(state->content), state->fan_button, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(state->content), state->fan_level_label, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(plugin), state->content);
     construct_settings(state, event_box);
     g_object_set_data_full(G_OBJECT(plugin), "rust-monitor-state", state,
@@ -682,6 +772,7 @@ monitor_construct(XfcePanelPlugin *plugin)
     mode_changed(plugin, xfce_panel_plugin_get_mode(plugin), state);
     gtk_widget_show_all(state->content);
     start_refresh(state);
+    start_fan_level_refresh(state);
 }
 
 XFCE_PANEL_PLUGIN_REGISTER(monitor_construct)

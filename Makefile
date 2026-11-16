@@ -58,11 +58,13 @@ test-ffi: rust
 		-o "$(NATIVE_BUILD_DIR)/ffi-smoke"
 	"$(NATIVE_BUILD_DIR)/ffi-smoke" config.example.toml
 
-$(FAN_TEST_PLUGIN): native/rust-monitor.c include/rust-monitor.h tests/fan-stub.c rust | check-deps
+$(FAN_TEST_PLUGIN): native/rust-monitor.c include/rust-monitor.h tests/fan-stub.c tests/fan-level-stub.c rust | check-deps
 	mkdir -p "$(NATIVE_BUILD_DIR)"
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -fPIC -Iinclude \
 		-Dmonitor_fan_step=smoke_fan_step -Dmonitor_fan_result_free=smoke_fan_result_free \
-		$$($(PKG_CONFIG) --cflags $(PACKAGES)) -shared -o "$@" native/rust-monitor.c tests/fan-stub.c \
+		-Dmonitor_fan_level_read=smoke_fan_level_read \
+		-Dmonitor_fan_level_free=smoke_fan_level_free \
+		$$($(PKG_CONFIG) --cflags $(PACKAGES)) -shared -o "$@" native/rust-monitor.c tests/fan-stub.c tests/fan-level-stub.c \
 		"$(RUST_LIB)" $(LDFLAGS) -Wl,-z,nodelete \
 		$$($(PKG_CONFIG) --libs $(PACKAGES)) -ldl -lpthread -lm $(LDLIBS)
 
