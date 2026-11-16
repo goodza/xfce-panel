@@ -81,6 +81,23 @@ fn write_level(level: Level) -> Result<(), String> {
     )
 }
 
+fn disable_with(mut write: impl FnMut(Level) -> Result<(), String>) -> FanStatus {
+    match write(Level::Off) {
+        Ok(()) => FanStatus {
+            status: "Smart fan control off: level 0 set".into(),
+            failed: false,
+        },
+        Err(error) => FanStatus {
+            status: format!("Smart fan control off: setting level 0 failed: {error}"),
+            failed: true,
+        },
+    }
+}
+
+pub fn disable() -> FanStatus {
+    disable_with(write_level)
+}
+
 pub(crate) struct FanStatus {
     pub status: String,
     pub failed: bool,
@@ -324,6 +341,30 @@ mod tests {
             },
         );
         assert!(status.failed && status.status.contains("Fallback level auto applied"));
+    }
+
+    #[test]
+    fn disable_writes_only_level_zero_without_fallback() {
+        let mut writes = Vec::new();
+        let status = disable_with(|level| {
+            writes.push(level);
+            Ok(())
+        });
+        assert!(!status.failed);
+        assert_eq!(status.status, "Smart fan control off: level 0 set");
+        assert_eq!(writes, [Level::Off]);
+
+        let mut writes = Vec::new();
+        let status = disable_with(|level| {
+            writes.push(level);
+            Err("permission denied".into())
+        });
+        assert!(status.failed);
+        assert_eq!(writes, [Level::Off]);
+        assert!(status
+            .status
+            .contains("setting level 0 failed: permission denied"));
+        assert!(!status.status.contains("Fallback"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ typedef struct {
     gboolean fan_worker_running;
     guint fan_timeout_id;
     guint fan_generation;
+    gboolean fan_off_pending;
     gboolean fan_level_in_flight;
     gboolean fan_level_worker_running;
     guint fan_level_timeout_id;
@@ -45,6 +46,7 @@ typedef struct {
 
 static void start_refresh(MonitorState *state);
 static void start_fan_refresh(MonitorState *state);
+static void start_fan_disable(MonitorState *state);
 static void start_fan_level_refresh(MonitorState *state);
 
 static MonitorState *
@@ -587,6 +589,7 @@ typedef struct {
     guint generation;
     guint off_celsius;
     guint auto_celsius;
+    gboolean disable;
 } FanJob;
 
 static void
@@ -610,7 +613,8 @@ fan_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cance
     MonitorState *state = job->state;
     (void) source;
     (void) cancel;
-    MonitorFanResult *res = monitor_fan_step(job->off_celsius, job->auto_celsius);
+    MonitorFanResult *res = job->disable ? monitor_fan_disable() :
+        monitor_fan_step(job->off_celsius, job->auto_celsius);
     g_mutex_lock(&state->worker_mutex);
     state->fan_worker_running = FALSE;
     g_cond_broadcast(&state->worker_done);
@@ -637,8 +641,29 @@ fan_done(GObject *source, GAsyncResult *result, gpointer data)
     (void) source;
     (void) data;
     state->fan_in_flight = FALSE;
-    if (!state->removed && state->fan_enabled) {
-        if (job->generation == state->fan_generation) {
+    if (!state->removed) {
+        if (job->disable) {
+            if (job->generation == state->fan_generation) {
+                if (!state->fan_enabled) {
+                    const gchar *status = res != NULL ? res->status : NULL;
+                    gboolean failed = res == NULL || res->failed != 0;
+                    state->fan_off_pending = FALSE;
+                    gtk_widget_set_tooltip_text(state->fan_button, status != NULL ? status :
+                                                "Smart fan control off: setting level 0 failed");
+                    set_fan_error(state, failed ?
+                        (status != NULL ? status : "setting level 0 failed") : NULL);
+                } else {
+                    start_fan_refresh(state);
+                }
+            } else if (state->fan_enabled) {
+                start_fan_refresh(state);
+            } else if (state->fan_off_pending) {
+                start_fan_disable(state);
+            }
+        } else if (!state->fan_enabled) {
+            if (state->fan_off_pending)
+                start_fan_disable(state);
+        } else if (job->generation == state->fan_generation) {
             const gchar *status = res != NULL ? res->status : NULL;
             gboolean failed = res == NULL || res->failed != 0;
             gtk_widget_set_tooltip_text(state->fan_button, status != NULL ? status :
@@ -675,6 +700,26 @@ start_fan_refresh(MonitorState *state)
 }
 
 static void
+start_fan_disable(MonitorState *state)
+{
+    if (state->removed || state->fan_enabled || !state->fan_off_pending ||
+        state->fan_in_flight)
+        return;
+    state->fan_in_flight = TRUE;
+    g_mutex_lock(&state->worker_mutex);
+    state->fan_worker_running = TRUE;
+    g_mutex_unlock(&state->worker_mutex);
+    FanJob *job = g_new0(FanJob, 1);
+    job->state = state_ref(state);
+    job->generation = state->fan_generation;
+    job->disable = TRUE;
+    GTask *task = g_task_new(state->plugin, NULL, fan_done, NULL);
+    g_task_set_task_data(task, job, fan_job_free);
+    g_task_run_in_thread(task, fan_worker);
+    g_object_unref(task);
+}
+
+static void
 fan_toggled(GtkToggleButton *button, MonitorState *state)
 {
     if (state->removed)
@@ -685,12 +730,19 @@ fan_toggled(GtkToggleButton *button, MonitorState *state)
         g_source_remove(state->fan_timeout_id);
         state->fan_timeout_id = 0;
     }
-    gtk_widget_set_tooltip_text(GTK_WIDGET(button), state->fan_enabled ?
-        "Smart fan control on: checking…" :
-        "Smart fan control off; last fan level left unchanged");
-    if (!state->fan_enabled)
+    if (state->fan_enabled) {
+        state->fan_off_pending = FALSE;
+        gtk_widget_set_tooltip_text(GTK_WIDGET(button),
+                                    "Smart fan control on: checking…");
         set_fan_error(state, NULL);
-    start_fan_refresh(state);
+        start_fan_refresh(state);
+    } else {
+        state->fan_off_pending = TRUE;
+        gtk_widget_set_tooltip_text(GTK_WIDGET(button),
+                                    "Smart fan control off: setting level 0…");
+        set_fan_error(state, NULL);
+        start_fan_disable(state);
+    }
 }
 
 static gboolean
@@ -740,7 +792,7 @@ monitor_construct(XfcePanelPlugin *plugin)
     state->fan_button = gtk_toggle_button_new();
     gtk_button_set_relief(GTK_BUTTON(state->fan_button), GTK_RELIEF_NONE);
     gtk_widget_set_tooltip_text(state->fan_button,
-                               "Smart fan control off; last fan level left unchanged");
+                               "Smart fan control off; enable to manage the fan level");
     atk_object_set_name(gtk_widget_get_accessible(state->fan_button), "Smart fan control");
     GtkWidget *icon = gtk_drawing_area_new();
     gtk_widget_set_size_request(icon, 16, 16);

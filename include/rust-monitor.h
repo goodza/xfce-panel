@@ -41,7 +41,15 @@ typedef struct MonitorFanResult {
  * Rebuild Rust and the adapter together when this signature changes. */
 MonitorFanResult *monitor_fan_step(uint32_t off_celsius, uint32_t auto_celsius);
 
-/* Release a result from monitor_fan_step and its status, exactly once. NULL allowed. */
+/* One blocking write of fan level 0 for disabling smart control; call off the
+ * GTK thread. Writes through the same fixed, bounded noninteractive sudo command.
+ * It reads no sensors and performs no fallback. Returns an owned result, or NULL
+ * on a contained panic. Rebuild Rust and the adapter together when this
+ * signature changes. */
+MonitorFanResult *monitor_fan_disable(void);
+
+/* Release a result from monitor_fan_step or monitor_fan_disable and its status,
+ * exactly once. NULL allowed. */
 void monitor_fan_result_free(MonitorFanResult *result);
 
 typedef struct MonitorFanLevel {

@@ -198,10 +198,18 @@ pub extern "C" fn monitor_fan_step(off_celsius: u32, auto_celsius: u32) -> *mut 
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// Write fan level 0 through the same bounded command path without reading sensors.
+/// Never calls GTK. Returns owned status with an error flag; NULL on panic.
+#[no_mangle]
+pub extern "C" fn monitor_fan_disable() -> *mut MonitorFanResult {
+    std::panic::catch_unwind(|| fan_result(fan::disable())).unwrap_or(std::ptr::null_mut())
+}
+
 /// Release the result and its status string. NULL is a no-op.
 ///
 /// # Safety
-/// result must be NULL or an unmodified, unfreed pointer returned by monitor_fan_step.
+/// result must be NULL or an unmodified, unfreed pointer returned by
+/// monitor_fan_step or monitor_fan_disable.
 #[no_mangle]
 pub unsafe extern "C" fn monitor_fan_result_free(result: *mut MonitorFanResult) {
     if !result.is_null() {
