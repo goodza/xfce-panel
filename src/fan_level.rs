@@ -8,7 +8,7 @@ pub(crate) struct FanLevelStatus {
     pub failed: bool,
 }
 
-fn level(text: &str) -> Result<&str, String> {
+pub(crate) fn level(text: &str) -> Result<&str, String> {
     let mut levels = text.lines().filter_map(|line| line.strip_prefix("level:"));
     let value = levels.next().ok_or("ThinkPad fan level missing")?.trim();
     if levels.next().is_some() {

@@ -1,7 +1,10 @@
-use crate::{config, extension, sensors};
-use std::{fs, path::Path};
+use crate::{config, extension, fan_level, sensors};
+use std::{fs, path::Path, thread, time::Duration};
 
 const FAN_PATH: &str = "/proc/acpi/ibm/fan";
+const KICK_TEMP: i64 = 80_000;
+const KICK_RPM: u64 = 2200;
+const KICK_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Level {
@@ -50,10 +53,15 @@ impl TemperatureRange {
     }
 }
 
-fn requested_level(temp: i64, rpm: u64, range: TemperatureRange) -> Option<Level> {
+fn requested_level(
+    temp: i64,
+    rpm: u64,
+    current_level: Option<&str>,
+    range: TemperatureRange,
+) -> Option<Level> {
     if temp > range.auto {
         Some(Level::Auto)
-    } else if temp < range.off && rpm < 2000 {
+    } else if (current_level == Some("auto") && rpm < 2200) || (temp < range.off && rpm < 2000) {
         Some(Level::Off)
     } else {
         None
@@ -103,11 +111,31 @@ pub(crate) struct FanStatus {
     pub failed: bool,
 }
 
+fn kick_with(
+    mut write: impl FnMut(Level) -> Result<(), String>,
+    delay: Duration,
+) -> Result<(), String> {
+    write(Level::Off).map_err(|e| format!("level 0 failed: {e}"))?;
+    thread::sleep(delay);
+    write(Level::Auto).map_err(|e| format!("level auto after level 0 failed: {e}"))
+}
+
 fn step_from(
     config_path: Option<&Path>,
     hwmon: &Path,
     fan_path: &Path,
     limits: (u32, u32),
+    write: impl FnMut(Level) -> Result<(), String>,
+) -> FanStatus {
+    step_from_delay(config_path, hwmon, fan_path, limits, KICK_DELAY, write)
+}
+
+fn step_from_delay(
+    config_path: Option<&Path>,
+    hwmon: &Path,
+    fan_path: &Path,
+    limits: (u32, u32),
+    kick_delay: Duration,
     mut write: impl FnMut(Level) -> Result<(), String>,
 ) -> FanStatus {
     let result = (|| {
@@ -127,10 +155,15 @@ fn step_from(
         let temp = temp
             .filter(|temp| *temp >= 0)
             .ok_or("CPU temperature unavailable or invalid")?;
-        let rpm = speed(
-            &fs::read_to_string(fan_path).map_err(|e| format!("{}: {e}", fan_path.display()))?,
-        )?;
-        match requested_level(temp, rpm, range) {
+        let contents =
+            fs::read_to_string(fan_path).map_err(|e| format!("{}: {e}", fan_path.display()))?;
+        let rpm = speed(&contents)?;
+        let current_level = fan_level::level(&contents).ok();
+        if current_level == Some("auto") && temp > KICK_TEMP && rpm < KICK_RPM {
+            kick_with(&mut write, kick_delay)?;
+            return Ok("Smart fan control on: level 0 for 3 s, then level auto".to_owned());
+        }
+        match requested_level(temp, rpm, current_level, range) {
             Some(level) => {
                 write(level)?;
                 Ok(match level {
@@ -172,22 +205,26 @@ mod tests {
 
     #[test]
     fn strict_temperature_and_rpm_boundaries() {
-        for (temp, rpm, expected) in [
-            (60_001, 5000, Some(Level::Auto)),
-            (60_001, 0, Some(Level::Auto)),
-            (60_000, 0, None),
-            (59_999, 0, None),
-            (58_000, 0, None),
-            (57_999, 1999, Some(Level::Off)),
-            (57_999, 2000, None),
-            (57_999, 2001, None),
-            (57_999, 0, Some(Level::Off)),
-            (70_000, 1000, Some(Level::Auto)),
+        for (temp, rpm, current, expected) in [
+            (60_001, 5000, None, Some(Level::Auto)),
+            (60_001, 0, Some("auto"), Some(Level::Auto)),
+            (60_000, 0, None, None),
+            (60_000, 2199, Some("auto"), Some(Level::Off)),
+            (60_000, 2200, Some("auto"), None),
+            (60_000, 0, Some("0"), None),
+            (59_999, 0, None, None),
+            (58_000, 0, None, None),
+            (57_999, 1999, None, Some(Level::Off)),
+            (57_999, 2000, None, None),
+            (57_999, 2001, Some("auto"), Some(Level::Off)),
+            (57_999, 2100, Some("7"), None),
+            (57_999, 0, None, Some(Level::Off)),
+            (70_000, 1000, None, Some(Level::Auto)),
         ] {
             assert_eq!(
-                requested_level(temp, rpm, TemperatureRange::new(58, 60).unwrap()),
+                requested_level(temp, rpm, current, TemperatureRange::new(58, 60).unwrap()),
                 expected,
-                "{temp}, {rpm}"
+                "{temp}, {rpm}, {current:?}"
             );
         }
         assert_eq!(
@@ -201,6 +238,162 @@ mod tests {
     }
 
     #[test]
+    fn automatic_level_below_2200_rpm_requests_off_without_overriding_hot_auto() {
+        let f = Fixture::new();
+        let cpu = f.write("cpu", "59000");
+        let config = f.write(
+            "config",
+            &format!("cpu_sensor={cpu:?}\nfan_sensors=[]\ndisks=[]"),
+        );
+        let fan = f.write("fan", "speed: 2100\nlevel: auto\n");
+        for (temp, contents, expected) in [
+            ("60000", "speed: 2199\nlevel: auto\n", Some(Level::Off)),
+            ("60000", "speed: 2200\nlevel: auto\n", None),
+            ("60001", "speed: 1000\nlevel: auto\n", Some(Level::Auto)),
+            ("59000", "speed: 2100\nlevel: auto\n", Some(Level::Off)),
+            ("59000", "speed: 2100\nlevel: 7\n", None),
+            ("59000", "speed: 2100\nlevel: invalid\n", None),
+        ] {
+            f.write("cpu", temp);
+            f.write("fan", contents);
+            let mut writes = Vec::new();
+            let status = step_from(Some(&config), &f.0, &fan, (58, 60), |level| {
+                writes.push(level);
+                Ok(())
+            });
+            assert!(!status.failed, "{temp}, {contents:?}: {}", status.status);
+            assert_eq!(
+                writes,
+                expected.into_iter().collect::<Vec<_>>(),
+                "{temp}, {contents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hot_auto_level_with_low_rpm_kicks_zero_then_auto() {
+        let f = Fixture::new();
+        let cpu = f.write("cpu", "80001");
+        let config = f.write(
+            "config",
+            &format!("cpu_sensor={cpu:?}\nfan_sensors=[]\ndisks=[]"),
+        );
+        let fan = f.write("fan", "speed: 2100\nlevel: auto\n");
+        for (temp, contents, limits, expected) in [
+            (
+                "80001",
+                "speed: 2100\nlevel: auto\n",
+                (58, 60),
+                vec![Level::Off, Level::Auto],
+            ),
+            (
+                "80001",
+                "speed: 2100\nlevel: auto\n",
+                (58, 90),
+                vec![Level::Off, Level::Auto],
+            ),
+            (
+                "80001",
+                "speed: 2200\nlevel: auto\n",
+                (58, 60),
+                vec![Level::Auto],
+            ),
+            (
+                "80000",
+                "speed: 1000\nlevel: auto\n",
+                (58, 60),
+                vec![Level::Auto],
+            ),
+            (
+                "80001",
+                "speed: 1000\nlevel: 7\n",
+                (58, 60),
+                vec![Level::Auto],
+            ),
+            (
+                "80001",
+                "speed: 1000\nlevel: invalid\n",
+                (58, 60),
+                vec![Level::Auto],
+            ),
+        ] {
+            f.write("cpu", temp);
+            f.write("fan", contents);
+            let mut writes = Vec::new();
+            let status = step_from_delay(
+                Some(&config),
+                &f.0,
+                &fan,
+                limits,
+                Duration::from_millis(1),
+                |level| {
+                    writes.push(level);
+                    Ok(())
+                },
+            );
+            assert!(!status.failed, "{temp}, {contents:?}: {}", status.status);
+            assert_eq!(writes, expected, "{temp}, {contents:?}, {limits:?}");
+            if writes.len() == 2 {
+                assert!(status.status.contains("level 0 for 3 s, then level auto"));
+            }
+        }
+    }
+
+    #[test]
+    fn kick_command_failures_use_auto_fallback_and_report() {
+        let f = Fixture::new();
+        let cpu = f.write("cpu", "80001");
+        let config = f.write(
+            "config",
+            &format!("cpu_sensor={cpu:?}\nfan_sensors=[]\ndisks=[]"),
+        );
+        let fan = f.write("fan", "speed: 1000\nlevel: auto\n");
+        let mut writes = Vec::new();
+        let status = step_from_delay(
+            Some(&config),
+            &f.0,
+            &fan,
+            (58, 60),
+            Duration::ZERO,
+            |level| {
+                writes.push(level);
+                if writes.len() == 1 {
+                    Err("off denied".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(status.failed);
+        assert_eq!(writes, [Level::Off, Level::Auto]);
+        assert!(status.status.contains("level 0 failed: off denied"));
+        assert!(status.status.contains("Fallback level auto applied"));
+
+        writes.clear();
+        let status = step_from_delay(
+            Some(&config),
+            &f.0,
+            &fan,
+            (58, 60),
+            Duration::ZERO,
+            |level| {
+                writes.push(level);
+                if writes.len() == 2 {
+                    Err("auto denied".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(status.failed);
+        assert_eq!(writes, [Level::Off, Level::Auto, Level::Auto]);
+        assert!(status
+            .status
+            .contains("level auto after level 0 failed: auto denied"));
+        assert!(status.status.contains("Fallback level auto applied"));
+    }
+
+    #[test]
     fn custom_ranges_and_invalid_ranges() {
         let range = TemperatureRange::new(40, 70).unwrap();
         for (temp, rpm, expected) in [
@@ -211,7 +404,7 @@ mod tests {
             (70_000, 0, None),
             (70_001, 5000, Some(Level::Auto)),
         ] {
-            assert_eq!(requested_level(temp, rpm, range), expected);
+            assert_eq!(requested_level(temp, rpm, None, range), expected);
         }
         assert!(TemperatureRange::new(30, 90).is_ok());
         for limits in [(29, 60), (58, 91), (60, 60), (70, 60), (0, u32::MAX)] {
